@@ -162,10 +162,55 @@ lines (`ticker.py:100` `blit()`, `:101` `effects.update()`, `:105`
 `ImageDraw`, `ImageFont`, or `render_tape`. Closes that criterion with
 profiler evidence instead of the structural argument alone.
 
+All five animation-engine phases are implemented and every acceptance
+criterion from the original handoff is checked off. The Phase 1
+`hw_scroll_spike.py` noted in `NOTES.md` remains open but never blocking,
+since the tape approach avoids hardware scroll entirely.
+
+## HUD daemon (oled-hud-handoff.md)
+
+New handoff, new phase namespace (`H0`-`H4`), built on top of the animation
+engine above. Order per the handoff: H0 → H1 → H3 → H2 → H4 (lifecycle
+before scheduler, since a daemon that can be run twice is the
+highest-probability failure).
+
+| Phase | What | Status | Artifacts |
+|---|---|---|---|
+| H0 | Compositor diff/coalesce engine | Done | `oled_hud/hud/compositor.py` (`Compositor`, `plan_run`, `cost`), `tests/test_compositor.py`, `oled_hud/demos/compositor_static.py` |
+| H1 | Store, producers, first real view | Not started | |
+| H3 | Lifecycle: singleton, reset, systemd | Not started | |
+| H2 | Views, scheduler, preemption, transitions | Not started | |
+| H4 | Buttons and burn-in | Not started | |
+
+### 2026-09-14 — session 6 (Phase H0)
+- `oled_hud/hud/compositor.py`: `Compositor` owns `fb`/`pushed` (4,128)
+  uint8 page-major arrays; widgets write into `fb` by slicing, `flush()`
+  diffs against `pushed` and pushes the minimum. `plan_run()` picks between
+  one push spanning a dirty-page run's column union and one push per page
+  narrowed to its own dirty columns, by the `BENCH.md` cost model
+  (`FIXED_MS = 0.6`, `PER_BYTE_MS = 0.009`, both kept as named constants
+  pointing back at the measurement, not tuning knobs). `force_full()` is a
+  one-shot flag consumed by the next `flush()`, for use after a hardware
+  reset or a burn-in offset change (H4) invalidates the `pushed` cache.
+- `tests/test_compositor.py`: 28 cases against a fake driver (records
+  `blit()` calls, no hardware) — every case from the handoff's acceptance
+  list (no-op flush, single-byte push, non-adjacent pages never coalesced,
+  the two-full-pages ticker case, the two-hotspot case where the per-page
+  plan must beat the union, `force_full()`'s one 512-byte push and its
+  one-shot behavior on the following flush), plus a `pushed == fb`
+  round-trip property over 20 random framebuffers and a plan-coverage
+  property (no dirty byte is ever left unpushed) over 50 random dirty
+  masks. All green; full suite 128/128.
+- `oled_hud/demos/compositor_static.py`: renders one static line via PIL
+  once, then runs a plain `FrameClock` loop calling only `flush()`,
+  printing pushes-per-frame. Confirmed live on hardware: frame 0 pushes
+  once (the dirty text region), frames 1-89 push zero — matches the H0
+  acceptance criterion exactly, at 29.9fps/3s with 0 late/dropped.
+
 ## Next up
 
-All five phases are implemented and every acceptance criterion from the
-handoff is now checked off. What's left is the Phase 1
-`hw_scroll_spike.py` noted in `NOTES.md` — never blocking, since the tape
-approach avoids hardware scroll entirely — and whatever the HUD daemon
-itself needs next.
+H1 needs real infra decisions before it can start: the Prometheus /
+Pi-hole / Alertmanager endpoints (config file outside the repo, per the
+handoff's security posture) and a font choice to vendor via
+`scripts/build_fonts.py` (Spleen and Tom Thumb are both handoff-approved).
+Those are inputs only the user can supply, not something to guess at.

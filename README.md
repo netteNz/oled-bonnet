@@ -75,10 +75,20 @@ To run at 1MHz I2C instead of the Pi's 100kHz default, add
   third of the run, error counts, and the worst-case slack floor.
 - `tests/` — `pytest` suite for `pack.py`/`tape.py` (checked byte-for-byte
   against `tests/reference.py`'s hardware-validated packer), for
-  `clock.py`/`effects.py` (driven by a fake clock and a fake display), and
-  for `soak.py`/`analyze_soak.py` (including the no-I/O-in-the-frame-path
-  constraint and both leak-shape directions the analyzer has to tell apart)
-  — all run fast and without hardware.
+  `clock.py`/`effects.py` (driven by a fake clock and a fake display), for
+  `soak.py`/`analyze_soak.py` (including the no-I/O-in-the-frame-path
+  constraint and both leak-shape directions the analyzer has to tell apart),
+  and for `oled_hud/hud/compositor.py` (a fake driver records `blit()`
+  calls; no hardware) — all run fast and without hardware.
+- `oled_hud/hud/compositor.py` — HUD daemon Phase H0: `Compositor` diffs a
+  packed framebuffer against what's known to be on the panel and pushes
+  only the minimum, choosing per dirty-page run between one wide push and
+  several narrow ones by the `BENCH.md` push-cost model. `force_full()`
+  invalidates the diff cache after a reset or burn-in offset change. See
+  `PROGRESS.md`'s "HUD daemon" section for phase status.
+- `oled_hud/demos/compositor_static.py` — demo: a static view through the
+  Compositor, printing pushes-per-frame to show it settles to zero once
+  nothing changes.
 
 ## Status
 

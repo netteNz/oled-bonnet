@@ -89,6 +89,12 @@ To run at 1MHz I2C instead of the Pi's 100kHz default, add
 - `oled_hud/demos/compositor_static.py` — demo: a static view through the
   Compositor, printing pushes-per-frame to show it settles to zero once
   nothing changes.
+- `oled_hud/hud/daemon.py` — HUD daemon Phase H3 (lifecycle): singleton via
+  a non-blocking `flock`, hardware reset + `force_full()` on startup, clean
+  `SIGTERM` shutdown. Entrypoint for `systemd/oled-hud.service`; see
+  `PROGRESS.md`'s "HUD daemon" section for what's verified vs. what still
+  needs the unit installed.
+- `systemd/oled-hud.service` — user unit template for the daemon above.
 
 ## Status
 

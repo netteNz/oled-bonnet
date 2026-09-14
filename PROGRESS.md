@@ -178,7 +178,7 @@ highest-probability failure).
 |---|---|---|---|
 | H0 | Compositor diff/coalesce engine | Done | `oled_hud/hud/compositor.py` (`Compositor`, `plan_run`, `cost`), `tests/test_compositor.py`, `oled_hud/demos/compositor_static.py` |
 | H1 | Store, producers, first real view | Not started | |
-| H3 | Lifecycle: singleton, reset, systemd | Not started | |
+| H3 | Lifecycle: singleton, reset, systemd | Code done, systemd unit not installed | `oled_hud/hud/daemon.py`, `tests/test_daemon.py`, `systemd/oled-hud.service` |
 | H2 | Views, scheduler, preemption, transitions | Not started | |
 | H4 | Buttons and burn-in | Not started | |
 
@@ -207,10 +207,50 @@ highest-probability failure).
   once (the dirty text region), frames 1-89 push zero — matches the H0
   acceptance criterion exactly, at 29.9fps/3s with 0 late/dropped.
 
+### 2026-09-14 — session 6 (Phase H3, continued)
+- `oled_hud/hud/daemon.py`: `acquire_singleton_lock()` (exclusive
+  non-blocking `flock` on `~/.oled-hud.lock`, kept open for process
+  lifetime so the kernel releases it on exit *or* crash — no pidfile
+  staleness possible), `reset_display()` (constructing `PartialSSD1305`
+  fresh toggles the reset pin and replays `init_display()` — confirmed by
+  reading `poweron()`/`init_display()` in the installed
+  `adafruit_ssd1305` source rather than assumed), and `main()`: acquire
+  lock before any hardware I/O → reset → `compositor.force_full()` → run.
+  SIGTERM sets a stop flag the same way `ticker.py` does; shutdown clears
+  the panel and closes the lock file. Since H1/H2 don't exist yet,
+  `render_placeholder()` draws a name+uptime view through the real
+  `Compositor` so the lifecycle is visually checkable today — it's
+  explicitly throwaway, replaced once `views.py`/`scheduler.py` land.
+- `tests/test_daemon.py`: 3 cases against `tmp_path` (no hardware) — a
+  second `acquire_singleton_lock()` call on a held path raises
+  `SystemExit`, closing the first releases it for a second caller, and a
+  direct `flock` probe confirms the lock is actually held, not just the
+  file opened. Full suite 131/131.
+- `systemd/oled-hud.service`: unit template (`ExecStart` pointed at this
+  repo's `.env`, `Restart=on-failure`, `RestartSec=2`).
+- Verified live, as a plain foreground process (systemd not yet
+  installed): a second launch while the first holds the lock exits 1 with
+  the lock message; `SIGTERM` (via `timeout`) drains cleanly — frame
+  summary printed, panel cleared, lock released — and a fresh launch
+  right after succeeds; `kill -9` leaves no stale lock (kernel-released)
+  and the next launch's `reset_display()` recovers the panel, same fix as
+  session 5's orphaned-ticker incident. `systemctl`-level acceptance
+  (`restart` mid-run, `kill -9` → auto-restart by systemd, `loginctl
+  enable-linger`) needs the actual unit installed, which needs one-time
+  `sudo` and starts a persistent background service holding the I2C bus —
+  held for explicit user go-ahead rather than done unprompted.
+
 ## Next up
 
-H1 needs real infra decisions before it can start: the Prometheus /
-Pi-hole / Alertmanager endpoints (config file outside the repo, per the
-handoff's security posture) and a font choice to vendor via
-`scripts/build_fonts.py` (Spleen and Tom Thumb are both handoff-approved).
-Those are inputs only the user can supply, not something to guess at.
+Two things need the user before more code gets written:
+- **Installing `systemd/oled-hud.service`** — `sudo loginctl
+  enable-linger`, `systemctl --user enable --now`, and the
+  `restart`/`kill -9`-under-systemd acceptance checks from the handoff.
+  Everything under the daemon's own control is already verified above.
+- **H1** needs the Prometheus / Pi-hole / Alertmanager endpoints (config
+  file outside the repo, per the handoff's security posture) and a font
+  choice to vendor via `scripts/build_fonts.py` (Spleen and Tom Thumb are
+  both handoff-approved). Inputs only the user can supply.
+
+H2 (scheduler) and H4 (buttons/burn-in) follow once those land, per the
+handoff's stated order.

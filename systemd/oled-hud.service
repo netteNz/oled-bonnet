@@ -1,0 +1,14 @@
+[Unit]
+Description=OLED HUD daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/Scripts/oled/.env/bin/python -m oled_hud.hud.daemon
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target

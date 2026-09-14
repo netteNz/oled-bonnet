@@ -240,6 +240,51 @@ highest-probability failure).
   `sudo` and starts a persistent background service holding the I2C bus —
   held for explicit user go-ahead rather than done unprompted.
 
+### 2026-09-14 — session 7 (playground demos, outside the phase structure)
+Same spirit as `walk.py` in session 2: exercises `Compositor` directly with
+real moving/reactive content, ahead of and separate from H1's
+Store/producers/views. Neither demo is a phase deliverable.
+
+- `oled_hud/demos/hud_animate.py`: a bouncing square on pages 0-1 and a
+  scrolling random-walk sparkline on pages 2-3, both numpy straight into
+  `Compositor.fb` (no PIL). Since both widgets change every frame, this is
+  the opposite case from `compositor_static.py` — it exercises `plan_run()`
+  choosing between a union push and a per-page plan on genuinely moving
+  content, not the settle-to-zero static case. Confirmed live at 60fps:
+  480 frames, only 1 late, 3.71 pushes/frame averaging 185 bytes — the
+  cost model correctly favors per-page pushes here since the sparkline
+  dirties nearly the full width on pages 2-3 while the ball only dirties a
+  narrow strip on pages 0-1.
+- `oled_hud/demos/audio_visualizer.py`: a live FFT spectrum analyzer off a
+  USB mic (a HyperX USB audio device, `sounddevice` device index 1 — no
+  built-in capture hardware on this Pi; needed `sudo apt install
+  portaudio19-dev` first, done by the user, then `pip install sounddevice`
+  into `.env`). `LatestBlock` holds only the newest mic block (written by
+  `sounddevice`'s own callback thread under a lock, read by the render
+  loop) — no ring buffer needed since a visualizer only ever wants the
+  newest window. 32 log-spaced bars (`bar_edges`/`bin_bars`), fast-attack /
+  slow-release envelope, drawn via `pack_bits` straight into `fb`.
+  Confirmed live at 30fps for a full minute: 1800 frames, 0 late, 0
+  dropped, min slack 9.7ms of a 33.3ms budget even with the FFT work per
+  frame.
+  - **Bug found live, fixed**: the two lowest bars never lit up. Cause: at
+    `WINDOW=2048` samples/44100Hz, each FFT bin is ~21.5Hz wide, but the
+    lowest log-spaced bars span only ~8-10Hz — no bin ever fell inside
+    them, so `bin_bars` left them at zero forever. Fixed by zero-padding
+    the FFT to `FFT_SIZE=8192` before `rfft` (interpolates the spectrum to
+    ~5.4Hz bins, no added capture latency since the captured window is
+    still 2048 samples) plus a nearest-bin fallback in `bin_bars` for any
+    band that still ends up narrower than one bin. Verified with a
+    synthetic broadband spectrum: 0 of 32 bars zero, versus dead bars
+    before the fix.
+  - **Tuning requested live**: high-frequency bars read quiet even with
+    audible treble present — real audio's natural spectral roll-off, not a
+    binning bug. Added `TILT_DB_PER_OCTAVE = 4.5`, a per-bar dB boost
+    proportional to `log2(center_freq / FMIN)` (~38dB boost at the top bar
+    vs. the bottom one for 32 bars over 40Hz-16kHz), applied after `bin_bars`
+    and before the dB-to-height normalization. Not yet confirmed live
+    against the fix (user hasn't reported back on the re-run).
+
 ## Next up
 
 Two things need the user before more code gets written:

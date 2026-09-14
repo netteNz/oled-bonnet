@@ -23,10 +23,20 @@ venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
     --soak-log runs/soak.jsonl
 .env/bin/python3 scripts/analyze_soak.py runs/soak.jsonl --exit-code $?
 .env/bin/python3 -m pytest tests/
+.env/bin/python3 -m oled_hud.demos.hud_animate --seconds 20
+.env/bin/python3 -m oled_hud.demos.audio_visualizer --list
+.env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --bars 32
 ```
 
 To run at 1MHz I2C instead of the Pi's 100kHz default, add
 `dtparam=i2c_arm_baudrate=1000000` to `/boot/firmware/config.txt` and reboot.
+
+`oled_hud/demos/audio_visualizer.py` additionally needs a capture device
+and `sounddevice`, neither installed by default: `sudo apt install -y
+portaudio19-dev` (system package, needs `sudo`; provides the headers
+`sounddevice` builds against) then `.env/bin/pip install sounddevice`.
+Run with `--list` first to see what `sounddevice` detects and pick the
+right `--device`.
 
 ## Layout
 
@@ -95,6 +105,17 @@ To run at 1MHz I2C instead of the Pi's 100kHz default, add
   `PROGRESS.md`'s "HUD daemon" section for what's verified vs. what still
   needs the unit installed.
 - `systemd/oled-hud.service` — user unit template for the daemon above.
+- `oled_hud/demos/hud_animate.py` — playground demo: a bouncing square
+  (pages 0-1) and a scrolling random-walk sparkline (pages 2-3) driven
+  straight through the Compositor, no PIL, no Store/producers — exercises
+  `plan_run()` against real per-frame motion rather than the static case.
+- `oled_hud/demos/audio_visualizer.py` — live FFT spectrum analyzer off a
+  USB mic via `sounddevice`: 32 log-spaced bars, zero-padded FFT (finer
+  bin spacing at the low end without added latency), a per-bar dB tilt to
+  counter real audio's high-frequency roll-off, fast-attack/slow-release
+  smoothing, drawn straight into the Compositor's `fb`. `--list` to see
+  detected devices, `--device` to pick one. See `PROGRESS.md` session 7
+  for the dead-low-bars bug and its fix.
 
 ## Status
 

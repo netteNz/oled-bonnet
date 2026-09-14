@@ -85,5 +85,6 @@ the raw pixel bytes.
   ADD", but 0x40 encodes its start line in the command byte itself and takes
   no argument, so that 0x2E lands as a command in its own right.
 
-See `PROGRESS.md` for the non-driver open items (the 30+ min soak and
-`py-spy` confirmation of the frame path).
+The 30+ min soak and `py-spy` frame-path confirmation both passed — see
+`PROGRESS.md` session 5. `hw_scroll_spike.py` above is the one remaining
+open item, driver or otherwise.

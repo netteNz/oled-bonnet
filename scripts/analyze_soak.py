@@ -4,8 +4,13 @@
 Checks the four things a soak run exists to answer, none of which a
 whole-run average would show:
 
-  RSS slope     least-squares KB/hour, bucket 0 excluded (import and first-touch
-                allocation land there and would tilt the fit)
+  RSS slope     least-squares KB/hour over the whole run and over the tail
+                (last third) separately, bucket 0 excluded (import and
+                first-touch allocation land there and would tilt the fit).
+                The tail slope is what actually distinguishes a leak from a
+                warm-up staircase that has since plateaued: a monotonic
+                bool alone can't, since a converged staircase never ticks
+                down and would read the same as an unbounded climb.
   Tail drift    mean blit p95 over the first third vs the last third — the
                 thing BENCH.md's 4.40 vs 3.20ms p95 disagreement makes worth
                 watching
@@ -86,9 +91,18 @@ def analyze(buckets):
     rss_t = [b["t"] for b in rss_buckets]
     rss_v = [b["rss_kb"] for b in rss_buckets]
     slope_kb_h = lstsq_slope(rss_t, rss_v) * 3600.0
+
+    # Whether the whole run ever ticked up is a bad leak signal on its own —
+    # a warm-up staircase that has since plateaued is monotonic by that
+    # definition too. What distinguishes them is whether the *tail* is still
+    # climbing, so slope is measured again over just the last third.
     monotonic = len(rss_v) >= 3 and all(
         b >= a for a, b in zip(rss_v, rss_v[1:])
     ) and rss_v[-1] > rss_v[0]
+    _, rss_tail = thirds(list(zip(rss_t, rss_v)))
+    tail_t = [x for x, _ in rss_tail]
+    tail_v = [y for _, y in rss_tail]
+    tail_slope_kb_h = lstsq_slope(tail_t, tail_v) * 3600.0 if len(tail_t) >= 2 else slope_kb_h
 
     p95s = [b["blit_ms"]["p95"] for b in buckets if "blit_ms" in b]
     first, last = thirds(p95s)
@@ -108,6 +122,7 @@ def analyze(buckets):
         "rss_first": rss_v[0] if rss_v else 0,
         "rss_last": rss_v[-1] if rss_v else 0,
         "rss_slope_kb_h": slope_kb_h,
+        "rss_tail_slope_kb_h": tail_slope_kb_h,
         "rss_monotonic": monotonic,
         "p95_first_third": first_p95,
         "p95_last_third": last_p95,
@@ -117,10 +132,11 @@ def analyze(buckets):
 
     checks = [
         (
-            "RSS slope under 1 MB/h, no monotonic climb",
-            slope_kb_h < RSS_SLOPE_LIMIT_KB_H and not monotonic,
-            f"{slope_kb_h:+.1f} KB/h, {results['rss_first']} -> {results['rss_last']} KB"
-            + (", MONOTONIC" if monotonic else ""),
+            "RSS slope under 1 MB/h, tail not still climbing",
+            slope_kb_h < RSS_SLOPE_LIMIT_KB_H and tail_slope_kb_h < RSS_SLOPE_LIMIT_KB_H,
+            f"overall {slope_kb_h:+.1f} KB/h, tail {tail_slope_kb_h:+.1f} KB/h, "
+            f"{results['rss_first']} -> {results['rss_last']} KB"
+            + (" (staircase warm-up, since plateaued)" if monotonic and tail_slope_kb_h < RSS_SLOPE_LIMIT_KB_H else ""),
         ),
         (
             "blit p95 last third within 15% of first",

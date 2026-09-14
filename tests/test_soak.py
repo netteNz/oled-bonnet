@@ -278,10 +278,11 @@ def test_healthy_run_passes_every_check():
 
 
 def test_a_leak_is_caught():
-    # 2 MB/hour climb, steadily upward.
+    # 2 MB/hour climb, steadily upward all the way through the tail.
     buckets = [make_bucket(t * 60.0, rss_kb=41216 + t * 34) for t in range(30)]
     results, checks = analyze_soak.analyze(buckets)
     assert results["rss_slope_kb_h"] > 1024
+    assert results["rss_tail_slope_kb_h"] > 1024
     assert results["rss_monotonic"] is True
     assert checks[0][1] is False
 
@@ -294,6 +295,29 @@ def test_warm_up_step_in_bucket_zero_is_ignored():
     results, checks = analyze_soak.analyze(buckets)
     assert results["rss_slope_kb_h"] == pytest.approx(0.0)
     assert checks[0][1] is True
+
+
+def test_a_plateaued_staircase_is_not_a_leak():
+    """Real soak shape: a few discrete steps early on (allocator/arena
+    warm-up), then flat. Monotonic over the whole run, but the tail has
+    converged — must pass, not fail, since nothing is still climbing."""
+    steps = [35604] * 12 + [35628] * 2 + [35640] * 8 + [35644] * 7  # 29 buckets
+    buckets = [make_bucket(t * 60.0, rss_kb=v) for t, v in enumerate(steps)]
+    results, checks = analyze_soak.analyze(buckets)
+    assert results["rss_monotonic"] is True  # never ticks down
+    assert results["rss_slope_kb_h"] < 1024
+    assert results["rss_tail_slope_kb_h"] < 1024  # flat by the end
+    assert checks[0][1] is True
+
+
+def test_a_climb_that_starts_late_is_still_caught():
+    """A leak that only kicks in partway through must still fail on tail
+    slope even though the overall-run slope is diluted by a flat first half."""
+    flat = [make_bucket(t * 60.0, rss_kb=40000) for t in range(15)]
+    climbing = [make_bucket((15 + t) * 60.0, rss_kb=40000 + t * 50) for t in range(15)]
+    results, checks = analyze_soak.analyze(flat + climbing)
+    assert results["rss_tail_slope_kb_h"] > 1024
+    assert checks[0][1] is False
 
 
 def test_tail_drift_is_caught():

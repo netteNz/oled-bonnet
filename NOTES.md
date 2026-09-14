@@ -49,9 +49,16 @@ pages (no partial-row read-modify-write is possible).
 ## `write_cmd`
 
 Public (no leading underscore) on `SSD1305_I2C`, implemented as a 2-byte
-I2C write (`0x80`, `cmd`) per call. `driver.py`'s `blit()` already calls it
-directly for `SET_COL_ADDR`/`SET_PAGE_ADDR` — confirms it's usable as the
-escape hatch Phase 4's `effects.py` (contrast/invert/all-on) will need.
+I2C write (`0x80`, `cmd`) per call. `driver.py`'s `blit()` calls it directly
+for `SET_COL_ADDR`/`SET_PAGE_ADDR`.
+
+Phase 4 took this escape hatch up as predicted: `oled_hud/effects.py` uses
+it for `all_on()` (`SET_ENTIRE_ON`, 0xA4/0xA5), which the Adafruit class
+doesn't expose — `contrast()` and `invert()` it does expose, so `effects.py`
+calls those rather than re-deriving the command bytes. The 2-byte-per-call
+cost is what makes these safe inside a frame loop: a command effect is a
+couple of bytes against a 256-byte blit, so it rides along in the frame
+budget instead of competing with the ticker for bandwidth.
 
 ## I2C buffer framing
 
@@ -65,7 +72,18 @@ the raw pixel bytes.
 
 - **`hw_scroll_spike.py`** — the one-off hardware-scroll spike (0x2E
   deactivate, fill buffer, 0x26 setup + 0x2F activate, confirm wraparound)
-  called for in the handoff has not been run. Not blocking Phase 2/3 since
-  the tape approach in the handoff explicitly avoids hardware scroll, but
-  it's still an open item if hardware scroll is ever wanted for something
-  else.
+  called for in the handoff has not been run. It never blocked anything:
+  the tape approach explicitly avoids hardware scroll, and all five phases
+  shipped without it.
+
+  Two things from the source worth knowing before attempting it. The
+  library has **no** scroll support — 0x26/0x27/0x2F appear nowhere in
+  `adafruit_ssd1305.py` — so a spike has to drive them through `write_cmd`
+  directly. And `init_display()` already emits a bare `0x2E` (deactivate
+  scroll), though it does so by accident: it is written as
+  `SET_DISP_START_LINE | 0x00` followed by `0x2E` commented "SET_DISP_START_LINE
+  ADD", but 0x40 encodes its start line in the command byte itself and takes
+  no argument, so that 0x2E lands as a command in its own right.
+
+See `PROGRESS.md` for the non-driver open items (the 30+ min soak and
+`py-spy` confirmation of the frame path).

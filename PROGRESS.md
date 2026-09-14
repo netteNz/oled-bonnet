@@ -12,15 +12,15 @@ Tracks progress against the original handoff (animation engine for the
 | 1 | Driver probe | Partial | `NOTES.md` (addressing, column offset, `write_cmd`). `hw_scroll_spike.py` not written. |
 | 2 | Packed-tape core | Done | `oled_hud/pack.py` (`pack_bits`/`pack_image`), `oled_hud/tape.py` (`Tape`), `tests/test_pack.py`, `oled_hud/demos/tape_scroll.py` |
 | 3 | Partial-window blitter | Done | `oled_hud/driver.py` (`PartialSSD1305.blit()`) |
-| 4 | Effects & scheduling | Not started | — needs `oled_hud/clock.py` (`FrameClock`), `oled_hud/effects.py` |
+| 4 | Effects & scheduling | Done | `oled_hud/clock.py` (`FrameClock`), `oled_hud/effects.py` (`contrast`/`invert`/`all_on`, `Fade`/`Blink`/`Flash`, `EffectQueue`), `tests/test_clock.py`, `tests/test_effects.py`, `oled_hud/demos/ticker.py` |
 
 ## Acceptance criteria (from handoff)
 
 - [x] `bench.py` numbers recorded in `BENCH.md` (full-frame at 100kHz/1MHz, partial blit at 1MHz)
-- [x] Ticker runs 60+ char string (`oled_hud/demos/tape_scroll.py`, confirmed live on hardware) — `FrameClock` itself is Phase 4, so "slack > 0" isn't measurable yet; pacing is still `time.sleep()`
-- [x] Zero Pillow/font calls in frame path — `Tape` rasterizes once at construction, `frame()` only slices pre-packed numpy bytes (structural check; `py-spy` verification is Phase 4)
+- [x] Ticker runs 60+ char string with slack > 0 — `oled_hud/demos/ticker.py` at 30fps: 360 frames in 12.0s, **slack mean 29.9ms / min 27.6ms of a 33.3ms budget**, 0 late, 0 dropped
+- [x] Zero Pillow/font calls in frame path — `Tape` rasterizes once at construction, `frame()` only slices pre-packed numpy bytes (structural check; `py-spy` still not run)
 - [x] Partial blit measurably faster than full `show()` for a 2-page region (recorded in `BENCH.md`)
-- [ ] Ticker runs 30+ min without drift/leak/I2C errors
+- [ ] Ticker runs 30+ min without drift/leak/I2C errors — runnable now via `ticker.py --seconds 1800`, but only 12s has actually been observed
 
 ## Session log
 
@@ -64,7 +64,35 @@ Tracks progress against the original handoff (animation engine for the
   via `Tape.frame()` -> `blit()`; confirmed live on hardware (clean scroll,
   clean Ctrl+C exit, screen cleared, exit code 0).
 
+### 2026-09-13 — session 4
+- Implemented Phase 4 (effects & scheduling).
+- `oled_hud/clock.py`: `FrameClock` — fixed-timestep pacer. Deadlines are
+  `t0 + n * period` from a fixed origin rather than a running sum, so a
+  slow frame can't shift every later one (the "no drift" criterion). On an
+  overrun it skips the frames it can no longer hit instead of bursting
+  through the backlog, and reports per-frame slack plus `stats()`/
+  `summary()`. `now`/`sleep` are injectable so tests drive it
+  deterministically instead of sleeping.
+- `oled_hud/effects.py`: command-register effects (`contrast`, `invert`,
+  `all_on`) built on the `write_cmd` escape hatch documented in `NOTES.md`,
+  plus non-blocking `Fade`/`Blink`/`Flash` and an `EffectQueue`. Effects are
+  driven by elapsed *time*, not frame count, so they run at the same
+  wall-clock speed whatever the fps or drop rate; each is self-terminating
+  (the update that returns False also restores the resting state).
+- `tests/test_clock.py` + `tests/test_effects.py`: 36 new cases (66 total,
+  all green) — drift-free deadlines over 1000 jittery frames, overrun and
+  drop/resync accounting, slack stats, contrast clamping, the 0xA4/0xA5
+  commands, and time-driven (not frame-driven) effect behaviour.
+- `oled_hud/demos/ticker.py`: `Tape` + `FrameClock` + `EffectQueue`, with
+  `--fps`/`--seconds`/`--step`/`--text`. Confirmed live on hardware:
+  30fps run was exactly on target with 0 late / 0 dropped; a deliberate
+  400fps overdrive (2.5ms budget vs ~3ms blit) degraded gracefully to
+  325fps with 1955 late / 446 dropped — frames + dropped matched the
+  expected slot count exactly, so the resync path is validated on the panel
+  and not just against the fake clock.
+
 ## Next up
 
-Phase 4 (`oled_hud/clock.py` `FrameClock` + `oled_hud/effects.py`) is the
-next gating piece — it can now build on `Tape` instead of raw PIL calls.
+All five phases from the handoff are implemented. Remaining open items:
+the 30+ min soak (`ticker.py --seconds 1800`), `py-spy` confirmation of the
+frame path, and the Phase 1 `hw_scroll_spike.py` noted in `NOTES.md`.

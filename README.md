@@ -18,6 +18,7 @@ venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
 .env/bin/python3 bench.py
 .env/bin/python3 walk.py
 .env/bin/python3 -m oled_hud.demos.tape_scroll
+.env/bin/python3 -m oled_hud.demos.ticker --fps 30 --seconds 60
 .env/bin/python3 -m pytest tests/
 ```
 
@@ -45,17 +46,33 @@ To run at 1MHz I2C instead of the Pi's 100kHz default, add
 - `oled_hud/tape.py` — `Tape`: rasterizes a PIL image once, then hands out
   ready-to-blit 128px-wide frames via `frame(x)` with no PIL calls in the
   hot path — the packed-tape core a scrolling ticker is built on.
+- `oled_hud/clock.py` — `FrameClock`: fixed-timestep pacer. Deadlines come
+  from a fixed origin, so a slow frame doesn't shift every later one; a bad
+  overrun skips missed frames rather than bursting to catch up. Reports
+  per-frame slack and a `summary()` of the measured frame budget.
+- `oled_hud/effects.py` — command-register effects: `contrast`, `invert`,
+  `all_on`, plus non-blocking `Fade`/`Blink`/`Flash` and an `EffectQueue`.
+  Driven by elapsed time rather than frame count, so they keep wall-clock
+  speed regardless of fps or dropped frames.
 - `oled_hud/demos/tape_scroll.py` — demo: scrolls a text ticker on pages 2-3
-  via `Tape.frame()` -> `blit()`.
-- `tests/` — `pytest` suite for `oled_hud/pack.py`/`oled_hud/tape.py`,
-  checked byte-for-byte against `tests/reference.py`'s hardware-validated
-  packer.
+  via `Tape.frame()` -> `blit()`, paced by `time.sleep()`.
+- `oled_hud/demos/ticker.py` — the same ticker on `FrameClock` with an
+  effect queue; takes `--fps`/`--seconds`/`--step`/`--text` and prints its
+  measured slack on exit.
+- `tests/` — `pytest` suite for `pack.py`/`tape.py` (checked byte-for-byte
+  against `tests/reference.py`'s hardware-validated packer) and for
+  `clock.py`/`effects.py` (driven by a fake clock and a fake display, so
+  they run fast and without hardware).
 
 ## Status
 
-Phases 0 (timing benchmarks), 1 (driver probe, partial), 2 (packed-tape
-core), and 3 (partial-blit driver) of the animation-engine plan are done —
-see `PROGRESS.md` for the phase/session tracker and `NOTES.md` for the
-Phase 1 driver notes. Phase 4 (effects & scheduling) is next. FPS and
-scroll-step choices are meant to come from `BENCH.md`'s measurements, not
-from assumptions.
+All five phases of the animation-engine plan are implemented: 0 (timing
+benchmarks), 1 (driver probe, partial), 2 (packed-tape core), 3
+(partial-blit driver) and 4 (effects & scheduling). See `PROGRESS.md` for
+the phase/session tracker and `NOTES.md` for the Phase 1 driver notes.
+
+At 30fps the ticker measures ~29.9ms of slack against a 33.3ms budget, so
+there is plenty of headroom on a 1MHz bus. FPS and scroll-step choices come
+from `BENCH.md`'s measurements and `FrameClock`'s reported slack, not from
+assumptions. Still open: a 30+ min soak run, `py-spy` confirmation of the
+frame path, and the `hw_scroll_spike.py` probe noted in `NOTES.md`.

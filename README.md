@@ -10,12 +10,15 @@ SSD1305 OLED driver + animation-engine work for a Raspberry Pi.
 ## Setup
 
 Dependencies live in the `.env` virtualenv (not `python-dotenv` — an actual
-venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`
-installed). Run scripts through it:
+venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
+`pytest` installed). Run scripts through it:
 
 ```
 .env/bin/python3 test.py
 .env/bin/python3 bench.py
+.env/bin/python3 walk.py
+.env/bin/python3 -m oled_hud.demos.tape_scroll
+.env/bin/python3 -m pytest tests/
 ```
 
 To run at 1MHz I2C instead of the Pi's 100kHz default, add
@@ -34,9 +37,25 @@ To run at 1MHz I2C instead of the Pi's 100kHz default, add
   and case — rerunning the same case adds a numbered run to its section
   instead of duplicating it.
 - `BENCH.md` — recorded timing results; see it for current numbers.
+- `walk.py` — stick-figure sprite that bounces back and forth across the
+  display via `PartialSSD1305.blit()`; also the source of the
+  hardware-validated packer used as a test oracle in `tests/reference.py`.
+- `oled_hud/pack.py` — `pack_bits()`/`pack_image()`: MVLSB packing (numpy
+  `packbits`, `bitorder="little"`) from a boolean pixel array or PIL image.
+- `oled_hud/tape.py` — `Tape`: rasterizes a PIL image once, then hands out
+  ready-to-blit 128px-wide frames via `frame(x)` with no PIL calls in the
+  hot path — the packed-tape core a scrolling ticker is built on.
+- `oled_hud/demos/tape_scroll.py` — demo: scrolls a text ticker on pages 2-3
+  via `Tape.frame()` -> `blit()`.
+- `tests/` — `pytest` suite for `oled_hud/pack.py`/`oled_hud/tape.py`,
+  checked byte-for-byte against `tests/reference.py`'s hardware-validated
+  packer.
 
 ## Status
 
-This is Phase 0 (timing benchmarks) and Phase 3 (partial-blit driver) of an
-animation-engine plan — FPS and scroll-step choices for later phases are
-meant to come from `BENCH.md`'s measurements, not from assumptions.
+Phases 0 (timing benchmarks), 1 (driver probe, partial), 2 (packed-tape
+core), and 3 (partial-blit driver) of the animation-engine plan are done —
+see `PROGRESS.md` for the phase/session tracker and `NOTES.md` for the
+Phase 1 driver notes. Phase 4 (effects & scheduling) is next. FPS and
+scroll-step choices are meant to come from `BENCH.md`'s measurements, not
+from assumptions.

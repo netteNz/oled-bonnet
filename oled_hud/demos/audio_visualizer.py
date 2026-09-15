@@ -13,9 +13,11 @@ Run with:
     .env/bin/python3 -m oled_hud.demos.audio_visualizer
     .env/bin/python3 -m oled_hud.demos.audio_visualizer --seconds 30 --bars 32
     .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1
+    .env/bin/python3 -m oled_hud.demos.audio_visualizer --style mirror
 """
 
 import argparse
+import signal
 import sys
 import threading
 
@@ -32,6 +34,7 @@ from oled_hud.pack import pack_bits
 
 WIDTH = 128
 HEIGHT = 32
+HALF = HEIGHT // 2
 SAMPLE_RATE = 44100
 WINDOW = 2048  # samples captured per frame == the callback's blocksize
 FFT_SIZE = 8192  # zero-padded rfft size: interpolates the spectrum to a finer
@@ -108,6 +111,24 @@ def draw_bars(fb: np.ndarray, env: np.ndarray, gap: int = 1) -> None:
     fb[...] = pack_bits(bits)
 
 
+def draw_bars_mirror(fb: np.ndarray, env: np.ndarray, gap: int = 1) -> None:
+    """Same bars, grown from the vertical center outward in both
+    directions instead of from the bottom -- `env` is expected scaled to
+    HALF (HEIGHT // 2), not HEIGHT, so a maxed-out bar spans the full panel.
+    """
+    n_bars = len(env)
+    bar_w = WIDTH // n_bars
+    bits = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    for i, h in enumerate(env):
+        h = int(np.clip(h, 0, HALF))
+        if h == 0:
+            continue
+        c0 = i * bar_w
+        c1 = c0 + max(bar_w - gap, 1)
+        bits[HALF - h : HALF + h, c0:c1] = True
+    fb[...] = pack_bits(bits)
+
+
 def open_stream(device, samplerate: int, blocksize: int, latest: LatestBlock) -> sd.InputStream:
     def callback(indata, frames, time_info, status):
         mono = indata[:, 0] if indata.ndim > 1 and indata.shape[1] > 1 else indata.reshape(-1)
@@ -129,6 +150,10 @@ def parse_args(argv=None):
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--seconds", type=float, default=0.0, help="0 runs until Ctrl+C")
     parser.add_argument("--bars", type=int, default=32)
+    parser.add_argument(
+        "--style", choices=["bars", "mirror"], default="bars",
+        help="bars grow from the bottom, mirror grows from the vertical center outward",
+    )
     parser.add_argument("--device", default=None, help="sounddevice index or name substring")
     parser.add_argument("--list", action="store_true", help="list audio devices and exit")
     return parser.parse_args(argv)
@@ -163,26 +188,34 @@ def main(argv=None):
     padded = np.zeros(FFT_SIZE, dtype=np.float32)
     freqs = np.fft.rfftfreq(FFT_SIZE, 1.0 / SAMPLE_RATE)
     env = np.zeros(args.bars)
+    draw = draw_bars_mirror if args.style == "mirror" else draw_bars
+    scale = HALF if args.style == "mirror" else HEIGHT
 
     edges = bar_edges(args.bars, FMIN, FMAX)
     centers = np.sqrt(edges[:-1] * edges[1:])
     tilt_db = TILT_DB_PER_OCTAVE * np.log2(centers / FMIN)
 
+    # SIGTERM (e.g. a background-task stop) takes the same clean-exit path
+    # as Ctrl+C, so the panel gets cleared either way instead of being left
+    # showing a stale frame.
+    stopping = []
+    signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
+
     clock = FrameClock(args.fps)
     with open_stream(device, SAMPLE_RATE, WINDOW, latest):
         try:
-            while not args.seconds or clock.elapsed < args.seconds:
+            while not stopping and (not args.seconds or clock.elapsed < args.seconds):
                 samples, ready = latest.get()
                 if ready:
                     padded[:WINDOW] = samples * window_fn
                     spec = np.abs(np.fft.rfft(padded))
                     bars = bin_bars(spec, freqs, edges)
                     db = 20 * np.log10(bars + 1e-6) + tilt_db
-                    target = np.clip((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR), 0.0, 1.0) * HEIGHT
+                    target = np.clip((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR), 0.0, 1.0) * scale
                     rate = np.where(target > env, ATTACK, RELEASE)
                     env += (target - env) * rate
 
-                draw_bars(comp.fb, env)
+                draw(comp.fb, env)
                 comp.flush()
                 clock.tick()
         except KeyboardInterrupt:

@@ -285,6 +285,98 @@ Store/producers/views. Neither demo is a phase deliverable.
     and before the dB-to-height normalization. Not yet confirmed live
     against the fix (user hasn't reported back on the re-run).
 
+### 2026-09-14 — session 8 (telemetry + more playground demos)
+Continues session 7's spirit: exercises the Compositor with real content
+outside the phase structure, ahead of H1's actual Store/producers/views.
+
+- `scripts/prom_pull.py`: standalone terminal script (stdlib `urllib`
+  only, no new dependency) pulling CPU temp, load1/5/15 and CPU usage %
+  from a remote Prometheus/node_exporter (the user's Pi 4 at
+  `192.168.50.249:9090`) via instant PromQL queries. `--interval` loops;
+  a poll failure prints and keeps going rather than crashing.
+- `oled_hud/demos/telemetry_display.py`: the same values rendered as text
+  through the real `Compositor`. Polling runs on its own cadence
+  (`--poll-interval`, default 5s), decoupled from the frame loop
+  (`--fps`) — most frames just flush an unchanged `fb` and push nothing,
+  same settle-to-zero case as `compositor_static.py`. A poll failure
+  keeps showing the last good reading instead of crashing the loop.
+  Confirmed live: 3/3 polls ok, 80 frames at 10fps, screen cleared on
+  exit.
+- `oled_hud/demos/audio_visualizer.py`: added `--style {bars,mirror}` —
+  `draw_bars_mirror()` grows bars from the vertical center (`HALF =
+  HEIGHT // 2`) outward in both directions instead of from the bottom,
+  reusing the same FFT/envelope pipeline (`scale` swaps between `HEIGHT`
+  and `HALF` depending on style). Confirmed live at 30fps, both styles,
+  0 dropped.
+  - **Investigated live**: bars moved with no audible input. A one-shot
+    capture read exactly zero energy, but a continuous capture showed
+    broadband noise (`raw_db` up to -25 to -50dB per band, pre-tilt) —
+    a disconnected/floating USB ADC input isn't silence, it's noise, and
+    it was landing above `DB_FLOOR = -60dB` even before the +38dB treble
+    tilt. Reconnecting the headset dropped it back to the idle floor
+    (~-87dB RMS). Considered a broadband-RMS squelch as a fix, but
+    measured real signal (a weak aux tap, see below) sits in roughly the
+    same dB range as the self-noise floor here, so a hard threshold would
+    risk clipping quiet real content too — skipped for now rather than
+    ship a fragile gate; the underlying finding (floating ADC = noise,
+    not silence) is worth remembering if this comes up again.
+  - A USB headset's mic can't hear its own headphone output acoustically
+    — confirmed live (RMS flat at -86 to -100dB regardless of headphone
+    playback). Briefly explored a PipeWire monitor-source loopback
+    (`pactl list sources short` shows a `...analog-stereo.monitor`
+    source; `pw-record --target <sink-node-name> --format f32 -` can
+    capture it) as a mic-free capture path, but two runs gave
+    inconsistent levels (one real, one flat) — likely a link-setup race,
+    not debugged further. The user instead ran a physical aux cable from
+    the headphone output into the mic input, which worked immediately and
+    far more simply: RMS swinging -78 to -103dB with real dynamics,
+    versus the flat -86/-100dB idle noise floor.
+- `oled_hud/demos/lufs_meter.py`: ITU-R BS.1770-4 loudness metering
+  instead of raw FFT amplitude. `Biquad` (direct-form-II-transposed,
+  state carried across audio blocks) cascades a high-shelf "pre-filter"
+  and a high-pass "RLB" stage; both derive their coefficients from the
+  filters' analog design parameters (f0/Q/gain) via the bilinear
+  transform rather than hardcoding the standard's 48kHz-only published
+  coefficients, since capture here is 44.1kHz — verified by re-deriving
+  at 48kHz and matching the published reference coefficients to 1e-9.
+  Momentary (400ms) and short-term (3s) loudness only, not gated
+  "integrated" programme loudness (a different, session-summary
+  algorithm a live per-frame meter doesn't need). **Validated against the
+  standard's own calibration point**: a synthetic -20dBFS 1kHz sine reads
+  -23.00 LUFS, exactly the commonly-cited BS.1770 reference check.
+  `NewestBlock` (unlike `audio_visualizer`'s `LatestBlock`) clears its
+  ready flag on read, since a LUFS sliding window must consume each
+  captured block exactly once — reprocessing one would double-count its
+  energy, unlike redrawing an unchanged FFT spectrum which is harmless.
+  Renders momentary LUFS as a ~6s scrolling history
+  (`WIDTH * WINDOW / SAMPLE_RATE`, given `--fps` keeps up with the audio
+  block rate). `--floor`/`--ceil` make the display range tunable — the
+  default broadcast range (-60/0) clipped the aux-tap signal flat, since
+  it measured -75 to -80 LUFS; `--floor -90 --ceil -50` fits it. Confirmed
+  live, 0 dropped.
+- **Bug found live, fixed**: stopping a demo as a background task (via
+  the harness's task-stop, which sends `SIGTERM`) left the panel showing
+  a stale frame — only `KeyboardInterrupt` (Ctrl+C/`SIGINT`) was handled,
+  so the `finally` cleanup that clears the screen never ran. Fixed by
+  giving `audio_visualizer.py` and `lufs_meter.py` the same `SIGTERM` ->
+  stopping-flag pattern `ticker.py` already used. Confirmed: a
+  backgrounded run, stopped via task-stop, still prints `clock.summary()`
+  before exiting, meaning the `finally` block (and its `display.fill(0)`)
+  ran.
+- `oled_hud/demos/wireframe.py`: a rotating 3D wireframe (`--shape
+  {cube,pyramid}`), no PIL — rotates a handful of 3D vertices per frame
+  (`rotation_matrix()`, two independent axes for a tumbling look),
+  perspective-projects them (`project()`, scaled to `HEIGHT` since the
+  panel is far wider than tall, a sphere would squash into an oval at this
+  aspect ratio but straight-edged shapes read fine compressed), and
+  rasterizes each edge as a line via `np.linspace` + rounding, no
+  Bresenham needed at this resolution. `SIGTERM`-aware from the start
+  (learned from the bug above). Confirmed live, both shapes, 450/450
+  frames each, 0 dropped. **Live feedback**: the pyramid (5 vertices, 8
+  edges) looks better than the cube (8 vertices, 12 edges) — fewer
+  overlapping lines means less aliasing clutter at 128x32 1-bit
+  resolution. Made `pyramid` the default shape.
+
 ## Next up
 
 Two things need the user before more code gets written:

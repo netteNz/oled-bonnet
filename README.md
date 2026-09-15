@@ -26,17 +26,31 @@ venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
 .env/bin/python3 -m oled_hud.demos.hud_animate --seconds 20
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --list
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --bars 32
+.env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --style mirror
+.env/bin/python3 -m oled_hud.demos.lufs_meter --device 1 --floor -90 --ceil -50
+.env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
+.env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
+.env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
 ```
 
 To run at 1MHz I2C instead of the Pi's 100kHz default, add
 `dtparam=i2c_arm_baudrate=1000000` to `/boot/firmware/config.txt` and reboot.
 
-`oled_hud/demos/audio_visualizer.py` additionally needs a capture device
-and `sounddevice`, neither installed by default: `sudo apt install -y
-portaudio19-dev` (system package, needs `sudo`; provides the headers
-`sounddevice` builds against) then `.env/bin/pip install sounddevice`.
-Run with `--list` first to see what `sounddevice` detects and pick the
-right `--device`.
+`oled_hud/demos/audio_visualizer.py` and `oled_hud/demos/lufs_meter.py`
+additionally need a capture device and `sounddevice`, neither installed by
+default: `sudo apt install -y portaudio19-dev` (system package, needs
+`sudo`; provides the headers `sounddevice` builds against) then
+`.env/bin/pip install sounddevice`. Run with `--list` first to see what
+`sounddevice` detects and pick the right `--device`. A USB headset's mic
+can't hear its own headphone output acoustically — if you want the
+visualizer/meter reacting to something playing over headphones, route it
+with a physical cable (headphone-out to mic-in) rather than relying on the
+mic to pick it up from the air.
+
+`scripts/prom_pull.py` and `oled_hud/demos/telemetry_display.py` need a
+reachable Prometheus/node_exporter (`--url`, default
+`http://192.168.50.249:9090` — the user's Pi 4). Both are stdlib-only
+(`urllib`), no extra dependency.
 
 ## Layout
 
@@ -114,8 +128,31 @@ right `--device`.
   bin spacing at the low end without added latency), a per-bar dB tilt to
   counter real audio's high-frequency roll-off, fast-attack/slow-release
   smoothing, drawn straight into the Compositor's `fb`. `--list` to see
-  detected devices, `--device` to pick one. See `PROGRESS.md` session 7
-  for the dead-low-bars bug and its fix.
+  detected devices, `--device` to pick one. `--style {bars,mirror}` picks
+  bottom-up bars or bars grown from the vertical center outward. `SIGTERM`
+  clears the panel the same way Ctrl+C does. See `PROGRESS.md` session 7
+  for the dead-low-bars bug and session 8 for the mirror style and a
+  floating-mic-input noise investigation.
+- `oled_hud/demos/lufs_meter.py` — ITU-R BS.1770-4 loudness meter off the
+  same mic capture: a K-weighting filter (`Biquad`, two cascaded stages,
+  coefficients derived per sample rate via the bilinear transform rather
+  than hardcoded for 48kHz) feeds momentary (400ms) and short-term (3s)
+  loudness, rendered as a scrolling LUFS history. `--floor`/`--ceil` tune
+  the display range for a given input chain's actual level. Validated
+  against BS.1770's own calibration point — see `PROGRESS.md` session 8.
+- `oled_hud/demos/wireframe.py` — a rotating 3D wireframe cube or pyramid
+  (`--shape`), no PIL: per-frame rotation matrix, perspective projection
+  scaled to the panel's 32px height, edges rasterized as lines via
+  `np.linspace`. `pyramid` is the default — fewer edges alias less at this
+  resolution than the cube, per live feedback in `PROGRESS.md` session 8.
+- `scripts/prom_pull.py` — standalone terminal script (stdlib `urllib`
+  only) pulling CPU temp/load/usage from a remote Prometheus/node_exporter
+  and printing them; `--interval` loops. No OLED involved — just the raw
+  numbers, for checking a telemetry source before wiring it into anything.
+- `oled_hud/demos/telemetry_display.py` — the same telemetry rendered as
+  text through the real Compositor. Polling (`--poll-interval`) runs on
+  its own cadence, decoupled from the frame loop (`--fps`) — a poll
+  failure keeps showing the last good reading instead of crashing.
 
 ## Status
 

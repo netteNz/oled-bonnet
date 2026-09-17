@@ -1,6 +1,7 @@
 # oled
 
-SSD1305 OLED driver + animation-engine work for a Raspberry Pi.
+SSD1305 OLED driver, animation engine, and a system-monitor HUD daemon
+for a Raspberry Pi.
 
 ## Hardware
 
@@ -31,6 +32,21 @@ venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
 .env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
 .env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
+.env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
+.env/bin/python3 -m oled_hud.hud.daemon
+.env/bin/python3 -m oled_hud.hud.daemon --font fixed4x6 --seconds 20 --stats
+.env/bin/python3 scripts/build_fonts.py
+```
+
+The daemon is the main thing here. On the default font it shows:
+
+```
++-------------------------+
+|rasp3            up 5h38m|
+|cpu 5%    53.7C   ld 0.37|
+|mem 574/905M      dsk 31%|
+|192.168.50.16       19.9G|
++-------------------------+
 ```
 
 To run at 1MHz I2C instead of the Pi's 100kHz default, add
@@ -102,8 +118,15 @@ reachable Prometheus/node_exporter (`--url`, default
   `clock.py`/`effects.py` (driven by a fake clock and a fake display), for
   `soak.py`/`analyze_soak.py` (including the no-I/O-in-the-frame-path
   constraint and both leak-shape directions the analyzer has to tell apart),
-  and for `oled_hud/hud/compositor.py` (a fake driver records `blit()`
-  calls; no hardware) — all run fast and without hardware.
+  for `oled_hud/hud/compositor.py` (a fake driver records `blit()` calls),
+  and for the Phase H1 modules — `test_font.py` checks generated glyphs
+  against golden bitmaps transcribed from the BDFs (the check that catches a
+  builder ignoring BBX offsets and flattening every descender onto the
+  baseline), `test_store.py` drives TTL staleness on an injected clock and
+  hammers the store from eight threads, `test_producers.py` runs the parsers
+  against captured `/proc` fixtures, and `test_views.py` asserts in a clean
+  subprocess that the render path never imports PIL — all run fast and
+  without hardware.
 - `oled_hud/hud/compositor.py` — HUD daemon Phase H0: `Compositor` diffs a
   packed framebuffer against what's known to be on the panel and pushes
   only the minimum, choosing per dirty-page run between one wide push and
@@ -113,12 +136,54 @@ reachable Prometheus/node_exporter (`--url`, default
 - `oled_hud/demos/compositor_static.py` — demo: a static view through the
   Compositor, printing pushes-per-frame to show it settles to zero once
   nothing changes.
-- `oled_hud/hud/daemon.py` — HUD daemon Phase H3 (lifecycle): singleton via
-  a non-blocking `flock`, hardware reset + `force_full()` on startup, clean
-  `SIGTERM` shutdown. Entrypoint for `systemd/oled-hud.service`; see
+- `oled_hud/hud/daemon.py` — HUD daemon entrypoint. Phase H3 (lifecycle):
+  singleton via a non-blocking `flock`, hardware reset + `force_full()` on
+  startup, clean `SIGTERM` shutdown. Phase H1 (content): drives a `Store`, a
+  `ProducerThread` and a `SysView`, re-rendering only when `store.version`
+  changes so almost every frame stays in the Compositor's push-nothing path
+  (measured: 19 renders and 21 pushes over 1800 frames at 60fps). `--font`
+  picks the bitmap font, `--stats` prints the render/push counts. No PIL
+  anywhere in the loop. Entrypoint for `systemd/oled-hud.service`; see
   `PROGRESS.md`'s "HUD daemon" section for what's verified vs. what still
   needs the unit installed.
 - `systemd/oled-hud.service` — user unit template for the daemon above.
+- `oled_hud/hud/store.py` — HUD daemon Phase H1: a thread-safe latest-value
+  store shared between the producer thread and the render loop. One value
+  per key, `snapshot()` copies everything under one lock, and staleness is
+  derived on read from each entry's TTL — a producer that dies stops
+  refreshing its key and the value ages out to `--` on its own, instead of
+  a frozen number that still looks live. A `version` counter is what the
+  daemon's re-render gate watches.
+- `oled_hud/hud/producers.py` — HUD daemon Phase H1: local-system producers
+  (CPU temp, CPU usage from a `/proc/stat` delta, load, memory via
+  `MemAvailable`, uptime, disk, hostname/IP) and the single thread that runs
+  them on their own cadences. Parsers are separate functions taking text, so
+  they're tested against captured `/proc` fixtures. A producer that raises
+  is counted and rescheduled, never fatal.
+- `oled_hud/hud/font.py` + `oled_hud/hud/fonts/` — HUD daemon Phase H1:
+  bitmap text with numpy only, no PIL. `oled_hud/hud/fonts/*.py` are
+  generated glyph data (base64-packed bits); rendering a string is one
+  fancy-index plus a reshape. `load("spleen")` (5x8, 25x4),
+  `load("tomthumb")` or `load("fixed4x6")` (both 4x6, 32x5). Spleen is the
+  default: see `PROGRESS.md` session 9 for why the 4x6 fonts lost and why
+  the answer to wanting more on screen turned out to be the layout, not a
+  smaller face.
+- `scripts/build_fonts.py` + `fonts/` — offline BDF-to-module builder and
+  the vendored BDF sources it reads. Run by hand, never imported at runtime;
+  deterministic, so a rebuild leaves the generated modules byte-identical.
+  See `fonts/NOTICE.md` for provenance and licensing.
+- `oled_hud/hud/views.py` — HUD daemon Phase H1: `SysView` turns a `Store`
+  snapshot into pixels and nothing else — no timer, no polling, no panel, so
+  H2's scheduler can decide when it's drawn without the view having an
+  opinion. `row()` packs several fields per line (first flush left, last
+  flush right, middles evenly spaced), which is what lets the readable
+  4-line font carry the same content as a 5-line one instead of leaving a
+  dozen dead columns in the middle of every row. Layout adapts to the font's
+  budget; a fifth line, when the font affords one, gets the 5- and
+  15-minute load averages.
+- `oled_hud/demos/font_sampler.py` — puts any of the three vendored fonts'
+  printable ASCII range (or `--text`) on the panel, so "25 readable columns
+  or 32 cramped ones" is judged by eye rather than from the numbers.
 - `oled_hud/demos/hud_animate.py` — playground demo: a bouncing square
   (pages 0-1) and a scrolling random-walk sparkline (pages 2-3) driven
   straight through the Compositor, no PIL, no Store/producers — exercises
@@ -170,6 +235,14 @@ frame loop never touches PIL/font code, not just by inspection — see
 `scripts/analyze_soak.py` methodology (including a real bug it caught in
 its own first version: a naive "monotonic" leak check that couldn't tell
 a plateaued warm-up staircase from an actual climb).
+
+On the HUD side, phases H0 (compositor), H1 (store, producers, fonts, first
+real view) and H3 (daemon lifecycle) are implemented. The daemon now shows
+live local-system telemetry through vendored bitmap fonts with no PIL in the
+frame path: a 30-second run at 60fps did 1800 frames with 0 late and 0
+dropped, re-rendering 19 times and pushing 21 times — over 99% of frames
+pushed nothing at all. H2 (view scheduler) and H4 (buttons, burn-in) are
+next; the `systemd` unit is still uninstalled and needs a one-time `sudo`.
 
 FPS and scroll-step choices come from `BENCH.md`'s measurements and
 `FrameClock`'s reported slack, not from assumptions. Still open: the

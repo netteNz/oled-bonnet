@@ -1,0 +1,181 @@
+"""Offline font builder: BDF -> a generated Python module of packed glyph data.
+
+Run by hand when a vendored font changes, never imported at runtime. The
+point is that `oled_hud/hud/font.py` needs no BDF parser, no file I/O and no
+PIL to draw text -- it imports a module that is already nothing but a
+base64 blob of bits, which keeps the frame path free of font machinery the
+way the animation-engine handoff requires.
+
+Both vendored fonts are fixed-width over ASCII 32..126 (Spleen 5x8,
+Tom Thumb 4x6 cells), so a glyph's advance is the cell width and the whole
+range packs into one (COUNT, CELL_H, CELL_W) bit array. The builder asserts
+that rather than assuming it: a proportional font would need a different
+runtime and should fail loudly here instead of rendering wrong.
+
+Usage:
+    .env/bin/python3 scripts/build_fonts.py                 # rebuild both
+    .env/bin/python3 scripts/build_fonts.py --font spleen   # just one
+"""
+
+import argparse
+import base64
+import os
+import textwrap
+
+import numpy as np
+
+FIRST = 32
+LAST = 126
+COUNT = LAST - FIRST + 1
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+FONTS = {
+    "spleen": "fonts/spleen-5x8.bdf",
+    "tomthumb": "fonts/tom-thumb.bdf",
+    "fixed4x6": "fonts/4x6.bdf",
+}
+
+OUT_DIR = "oled_hud/hud/fonts"
+
+
+def parse_bdf(text: str) -> tuple[int, int, dict[int, np.ndarray]]:
+    """Parse a BDF into (cell_h, font_y_offset, {codepoint: (bw, bh, bx, by, rows)}).
+
+    Only what this builder needs: the font bounding box (for the cell height
+    and the descent), and per glyph its own BBX plus the hex bitmap rows.
+    BDF bitmap rows are MSB-first and padded out to whole bytes, so a 3px-wide
+    glyph still stores one byte per row with the low 5 bits unused.
+    """
+    cell_h = font_y = None
+    glyphs: dict[int, tuple] = {}
+
+    code = bbx = dwidth = None
+    rows: list[int] = []
+    reading = False
+
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        key = parts[0]
+
+        if key == "FONTBOUNDINGBOX":
+            _, cell_h, _, font_y = (int(v) for v in parts[1:5])
+        elif key == "ENCODING":
+            code = int(parts[1])
+        elif key == "DWIDTH":
+            dwidth = int(parts[1])
+        elif key == "BBX":
+            bbx = tuple(int(v) for v in parts[1:5])
+        elif key == "BITMAP":
+            rows, reading = [], True
+        elif key == "ENDCHAR":
+            reading = False
+            if code is not None:
+                glyphs[code] = (dwidth, bbx, rows)
+            code = bbx = dwidth = None
+        elif reading:
+            rows.append(int(key, 16) if key else 0)
+
+    if cell_h is None:
+        raise ValueError("no FONTBOUNDINGBOX in BDF")
+    return cell_h, font_y, glyphs
+
+
+def place(bw: int, bh: int, bx: int, by: int, rows: list[int],
+          cell_w: int, cell_h: int, font_y: int) -> np.ndarray:
+    """Rasterize one glyph into its (cell_h, cell_w) cell.
+
+    BDF positions a glyph by its own bounding box relative to the baseline,
+    not by the cell: `by` is how far the glyph's bottom sits above the
+    baseline and `font_y` is how far the cell's bottom sits below it, so the
+    glyph's bottom row lands (by - font_y) rows up from the bottom of the
+    cell. That is what puts a descender ('g', 'p') one row lower than an 'o'
+    -- assuming BBX == cell would flatten every glyph onto the same baseline.
+    """
+    cell = np.zeros((cell_h, cell_w), dtype=bool)
+    bottom = cell_h - (by - font_y)          # one past the glyph's last row
+    top = bottom - bh
+    for i, value in enumerate(rows[:bh]):
+        y = top + i
+        if not 0 <= y < cell_h:
+            continue                          # glyph taller than the cell
+        # Row is left-aligned in a whole number of bytes, MSB first.
+        pad = (-bw) % 8
+        for j in range(bw):
+            x = bx + j
+            if 0 <= x < cell_w and (value >> (bw + pad - 1 - j)) & 1:
+                cell[y, x] = True
+    return cell
+
+
+def build(bdf_path: str) -> tuple[int, int, np.ndarray]:
+    with open(bdf_path) as fh:
+        cell_h, font_y, glyphs = parse_bdf(fh.read())
+
+    widths = {glyphs[c][0] for c in range(FIRST, LAST + 1) if c in glyphs}
+    if len(widths) != 1:
+        raise ValueError(f"{bdf_path}: not fixed-width over ASCII, DWIDTHs={sorted(widths)}")
+    cell_w = widths.pop()
+
+    out = np.zeros((COUNT, cell_h, cell_w), dtype=bool)
+    missing = []
+    for code in range(FIRST, LAST + 1):
+        if code not in glyphs:
+            missing.append(code)
+            continue
+        _, (bw, bh, bx, by), rows = glyphs[code]
+        out[code - FIRST] = place(bw, bh, bx, by, rows, cell_w, cell_h, font_y)
+    if missing:
+        raise ValueError(f"{bdf_path}: missing ASCII codepoints {missing}")
+    return cell_w, cell_h, out
+
+
+TEMPLATE = '''"""Packed {name} glyph data, ASCII {first}..{last}.
+
+Generated by scripts/build_fonts.py from {source} -- do not edit by hand.
+DATA is base64 of np.packbits() over a (COUNT, CELL_H, CELL_W) bool array.
+"""
+
+NAME = "{name}"
+SOURCE = "{source}"
+CELL_W = {cell_w}
+CELL_H = {cell_h}
+FIRST = {first}
+COUNT = {count}
+DATA = (
+{blob}
+)
+'''
+
+
+def emit(name: str, source: str, cell_w: int, cell_h: int, bits: np.ndarray) -> str:
+    blob = base64.b64encode(np.packbits(bits.ravel()).tobytes()).decode()
+    wrapped = "\n".join(f'    "{chunk}"' for chunk in textwrap.wrap(blob, 72))
+    return TEMPLATE.format(
+        name=name, source=source, cell_w=cell_w, cell_h=cell_h,
+        first=FIRST, last=LAST, count=COUNT, blob=wrapped,
+    )
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--font", choices=sorted(FONTS), action="append",
+                        help="build just this font (repeatable); default builds all")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    for name in args.font or sorted(FONTS):
+        source = FONTS[name]
+        cell_w, cell_h, bits = build(os.path.join(REPO, source))
+        path = os.path.join(REPO, OUT_DIR, f"{name}.py")
+        with open(path, "w") as fh:
+            fh.write(emit(name, source, cell_w, cell_h, bits))
+        print(f"{name}: {cell_w}x{cell_h} cell, {COUNT} glyphs -> {OUT_DIR}/{name}.py")
+
+
+if __name__ == "__main__":
+    main()

@@ -35,6 +35,22 @@ sounddevice==0.5.6
 cffi==2.1.1
 pycparser==3.0
 
+# --- coinbase_ticker.py demo only ----------------------------------------
+# The official SDK builds and signs the per-request CDP JWT itself; see
+# oled_hud/demos/coinbase_ticker.py and .env.secrets.example for the
+# credential format. The rest of this block is coinbase-advanced-py's own
+# transitive deps, listed so a rebuild is exact.
+coinbase-advanced-py==1.8.4
+requests==2.34.2
+websockets==13.1
+backoff==2.2.1
+PyJWT==2.14.0
+cryptography==50.0.1
+urllib3==2.8.0
+idna==3.20
+charset-normalizer==3.5.1
+certifi==2026.7.22
+
 # --- development --------------------------------------------------------
 pytest==9.1.1
 iniconfig==2.3.0

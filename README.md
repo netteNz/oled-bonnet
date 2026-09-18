@@ -39,6 +39,7 @@ scripts through the venv:
 .env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
 .env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
+.env/bin/python3 -m oled_hud.demos.coinbase_ticker --poll-interval 15
 .env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
 .env/bin/python3 -m oled_hud.hud.daemon
 .env/bin/python3 -m oled_hud.hud.daemon --font fixed4x6 --seconds 20 --stats
@@ -75,6 +76,15 @@ mic to pick it up from the air.
 reachable Prometheus/node_exporter (`--url`, default
 `http://192.168.50.249:9090` — the user's Pi 4). Both are stdlib-only
 (`urllib`), no extra dependency.
+
+`oled_hud/demos/coinbase_ticker.py` needs a Coinbase Developer Platform
+(CDP) API key and reads it from `.env.secrets` in the repo root — gitignored,
+`chmod 600`, **not** named `.env` since that's the venv directory (see
+Setup above). Copy `.env.secrets.example` to `.env.secrets` and fill in your
+own `CDP_API_KEY` and `CDP_API_SECRET`; never commit the real file. Auth
+goes through the official `coinbase-advanced-py` SDK's `RESTClient` (in
+`requirements.txt`), which signs the per-request JWT itself and works with
+either an Ed25519 or an EC secret.
 
 ## Layout
 
@@ -234,6 +244,10 @@ reachable Prometheus/node_exporter (`--url`, default
   text through the real Compositor. Polling (`--poll-interval`) runs on
   its own cadence, decoupled from the frame loop (`--fps`) — a poll
   failure keeps showing the last good reading instead of crashing.
+- `oled_hud/demos/coinbase_ticker.py` — live BTC-USD price and BTC holding
+  through the Compositor, same poll/frame-loop split as
+  `telemetry_display.py`. Auth via the official `coinbase-advanced-py`
+  SDK's `RESTClient`, credentials from `.env.secrets` (see Setup above).
 
 ## Status
 

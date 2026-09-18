@@ -3,3 +3,4 @@ __pycache__/
 .claude/settings.local.json
 runs/
 .lgd-nfy*
+.env.secrets

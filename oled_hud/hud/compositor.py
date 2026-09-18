@@ -9,16 +9,27 @@ narrow ones by the push-cost model below. Nothing here touches PIL, fonts,
 disk or network -- `flush()`'s only I/O is the `driver.blit()` calls it makes.
 """
 
+from typing import Protocol
+
 import numpy as np
 
-PAGES = 4
-WIDTH = 128
+from oled_hud.hud import PAGES, WIDTH
 
 # BENCH.md, 1MHz partial-blit fit: T(push) ~= FIXED + bytes * PER_BYTE.
 # Measurements from the real panel, not tuning knobs -- don't change these
 # without rerunning bench.py.
 FIXED_MS = 0.6
 PER_BYTE_MS = 0.009
+
+
+class Driver(Protocol):
+    """All `Compositor` needs of a panel. Stated as a Protocol because the
+    tests pass a recorder, not a `PartialSSD1305`, and that is the point --
+    nothing here should be able to grow a dependency on real hardware.
+    """
+
+    def blit(self, data: bytes, *, col: int, ncols: int,
+             page0: int, page1: int) -> None: ...
 
 
 def cost(npages: int, ncols: int) -> float:
@@ -57,7 +68,7 @@ class Compositor:
     `PartialSSD1305` or a test double.
     """
 
-    def __init__(self, driver):
+    def __init__(self, driver: Driver):
         self.driver = driver
         self.fb = np.zeros((PAGES, WIDTH), dtype=np.uint8)
         self.pushed = np.zeros((PAGES, WIDTH), dtype=np.uint8)

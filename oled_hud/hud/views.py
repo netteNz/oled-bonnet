@@ -12,26 +12,39 @@ both was to be able to choose on the panel. Rows marked optional are dropped
 first when the font only affords four lines.
 
 Every value goes through `fmt()`, which is the single place a stale or
-missing reading becomes "--". Scattering that check through the layout is
-how a HUD ends up displaying one field's last-known number forever.
+missing reading becomes "--" -- including the ones that need a conversion
+first, which is what `fmt`'s `transform` hook is for. Scattering that check
+through the layout is how a HUD ends up displaying one field's last-known
+number forever.
 """
+
+from collections.abc import Callable
 
 import numpy as np
 
-from oled_hud.pack import pack_bits
+from oled_hud.hud import HEIGHT, WIDTH
+from oled_hud.hud.font import Font
 from oled_hud.hud.producers import format_uptime
+from oled_hud.hud.store import Snapshot
+from oled_hud.pack import pack_bits
 
-WIDTH = 128
-HEIGHT = 32
 MISSING = "--"
 
 
-def fmt(snap: dict, key: str, spec: str = "{:.1f}", *, now: float) -> str:
-    """Format one reading, or MISSING if it is absent or aged out."""
+def fmt(snap: Snapshot, key: str, spec: str = "{:.1f}", *, now: float,
+        transform: Callable[[object], object] | None = None) -> str:
+    """Format one reading, or MISSING if it is absent or aged out.
+
+    `transform` runs between the reading and the spec, for values that need
+    a conversion rather than a format -- uptime seconds into "5h18m". It is
+    deliberately applied *after* the freshness check, so a stale reading
+    costs nothing and can never reach a transform expecting a live value.
+    """
     reading = snap.get(key)
     if reading is None or not reading.fresh(now):
         return MISSING
-    return spec.format(reading.value)
+    value = transform(reading.value) if transform is not None else reading.value
+    return spec.format(value)
 
 
 def row(fields: list[str], cols: int) -> str:
@@ -72,9 +85,11 @@ def row(fields: list[str], cols: int) -> str:
 class SysView:
     """Host, CPU, memory, disk and network from the local-system producers."""
 
+    #: Identifies this view to H2's scheduler, which will select among
+    #: several by name. Nothing reads it yet.
     name = "sys"
 
-    def __init__(self, font):
+    def __init__(self, font: Font):
         self.font = font
         self.lines = HEIGHT // font.height
         self.cols = WIDTH // font.advance
@@ -82,7 +97,7 @@ class SysView:
         # (Tom Thumb: 5 rows of 6 leaves 2).
         self.y0 = (HEIGHT - self.lines * font.height) // 2
 
-    def rows(self, snap: dict, now: float) -> list[tuple[list[str], bool]]:
+    def rows(self, snap: Snapshot, now: float) -> list[tuple[list[str], bool]]:
         """(fields, optional) per display row.
 
         Grouped by what belongs together rather than one metric per line, so
@@ -90,15 +105,12 @@ class SysView:
         ones. Worst case ("cpu 100%", "100.0C", "ld 12.34") is 24 of 25
         columns, so nothing truncates in practice.
         """
-        host = snap.get("sys.host")
-        up = snap.get("sys.uptime")
         return [
             (
                 [
-                    host.value if host is not None and host.fresh(now) else MISSING,
-                    f"up {format_uptime(up.value)}"
-                    if up is not None and up.fresh(now)
-                    else f"up {MISSING}",
+                    fmt(snap, "sys.host", "{}", now=now),
+                    "up " + fmt(snap, "sys.uptime", "{}", now=now,
+                                transform=format_uptime),
                 ],
                 False,
             ),
@@ -112,8 +124,8 @@ class SysView:
             ),
             (
                 [
-                    "mem " + fmt(snap, "mem.used_mb", "{:.0f}", now=now)
-                    + "/" + fmt(snap, "mem.total_mb", "{:.0f}M", now=now),
+                    "mem " + fmt(snap, "mem.used_mb", "{:.0f}", now=now) + "/"
+                    + fmt(snap, "mem.total_mb", "{:.0f}M", now=now),
                     "dsk " + fmt(snap, "disk.pct", "{:.0f}%", now=now),
                 ],
                 False,
@@ -148,12 +160,12 @@ class SysView:
             del kept[drop]
         return [fields for fields, _ in kept]
 
-    def render(self, canvas: np.ndarray, snap: dict, now: float) -> None:
+    def render(self, canvas: np.ndarray, snap: Snapshot, now: float) -> None:
         """Draw into a (32, 128) bool canvas. Caller clears it."""
         for i, fields in enumerate(self.select(self.rows(snap, now))):
             self.font.draw(canvas, row(fields, self.cols), 0, self.y0 + i * self.font.height)
 
-    def render_into(self, fb: np.ndarray, snap: dict, now: float) -> None:
+    def render_into(self, fb: np.ndarray, snap: Snapshot, now: float) -> None:
         """Render and pack straight into a Compositor framebuffer.
 
         The bool canvas is the intermediate because text rows land at

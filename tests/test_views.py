@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from oled_hud.hud.font import load
+from oled_hud.hud.producers import format_uptime
 from oled_hud.hud.store import Reading, Store
 from oled_hud.hud.views import HEIGHT, MISSING, WIDTH, SysView, fmt, row
 
@@ -108,6 +109,18 @@ def test_fmt_returns_missing_for_a_stale_reading():
     assert fmt(snap(x=1.0), "x", now=NOW + 61.0) == MISSING
 
 
+def test_fmt_applies_a_transform_before_formatting():
+    # Uptime needs format_uptime() between the reading and the spec. Without
+    # a hook here that one field has to open-code the freshness check, which
+    # is exactly the scattering this module's docstring warns about.
+    assert fmt(snap(x=19139.0), "x", "{}", now=NOW, transform=format_uptime) == "5h18m"
+
+
+def test_fmt_skips_the_transform_for_a_stale_reading():
+    stale = fmt(snap(x=19139.0), "x", "{}", now=NOW + 61.0, transform=format_uptime)
+    assert stale == MISSING
+
+
 def test_spleen_gets_four_lines_of_twenty_five(spleen_view):
     assert (spleen_view.lines, spleen_view.cols) == (4, 25)
 
@@ -185,6 +198,16 @@ def test_stale_readings_become_placeholders(spleen_view):
     out = lines(spleen_view, snap(**FULL), now=NOW + 61.0)
     assert "5h18m" not in " ".join(out)
     assert all(MISSING in line for line in out)
+
+
+def test_a_stale_host_and_uptime_keep_row_ones_shape(spleen_view):
+    # Row 1's two fields are the only ones that needed a transform or no
+    # format spec at all, so they are the ones most likely to drift when
+    # fmt() changes: the label stays, only the number goes.
+    out = lines(spleen_view, snap(**FULL), now=NOW + 61.0)
+    assert out[0].startswith(MISSING)
+    assert out[0].endswith(f"up {MISSING}")
+    assert len(out[0]) == spleen_view.cols
 
 
 def test_one_dead_producer_does_not_blank_the_others(spleen_view):

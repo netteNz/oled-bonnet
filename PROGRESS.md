@@ -177,8 +177,9 @@ highest-probability failure).
 | Phase | What | Status | Artifacts |
 |---|---|---|---|
 | H0 | Compositor diff/coalesce engine | Done | `oled_hud/hud/compositor.py` (`Compositor`, `plan_run`, `cost`), `tests/test_compositor.py`, `oled_hud/demos/compositor_static.py` |
-| H1 | Store, producers, first real view | Done | `oled_hud/hud/store.py`, `producers.py`, `font.py`, `fonts/` (3 fonts + `scripts/build_fonts.py`, `fonts/*.bdf`), `views.py` (`SysView`), `tests/test_{font,store,producers,views}.py`, `oled_hud/demos/font_sampler.py` |
+| H1 | Store, producers, first real view | Done | `oled_hud/hud/store.py`, `producers.py`, `font.py`, `fonts/` (3 fonts + `scripts/build_fonts.py`, `fonts/*.bdf`), `views.py` (`SysView`), `tests/test_{font,store,producers,views}.py`, `oled_hud/demos/font_sampler.py`, `oled_hud/hud/__init__.py` (panel geometry) |
 | H3 | Lifecycle: singleton, reset, systemd | Code done, systemd unit not installed | `oled_hud/hud/daemon.py`, `tests/test_daemon.py`, `systemd/oled-hud.service` |
+| — | `driver.py` blit coverage (session 10) | Done | `tests/test_driver.py` |
 | H2 | Views, scheduler, preemption, transitions | Not started | |
 | H4 | Buttons and burn-in | Not started | |
 
@@ -435,9 +436,12 @@ on the panel, not from character counts.
 - `oled_hud/hud/views.py`: `SysView` owns no timer, no polling and no panel —
   it turns a snapshot into pixels, which leaves H2's scheduler free to decide
   *when* without the view having an opinion. Layout is computed from the font
-  (Spleen 4x25, Tom Thumb 5x32) and the disk row is marked optional, so it's
-  the row dropped when only four lines fit. Every value goes through one
-  `fmt()` — the single place a stale reading becomes `--`.
+  (Spleen 4x25, Tom Thumb 5x32) and the 5/15-minute load row is marked
+  optional, so it's the row dropped when only four lines fit — disk rides
+  along on the memory and IP rows instead of being dropped, which is the
+  whole point of the packed layout further down this session. Every value
+  goes through one `fmt()` — the single place a stale reading becomes `--`,
+  including the two that need a conversion first, via its `transform` hook.
 - `oled_hud/hud/daemon.py`: `render_placeholder()` and the PIL import are
   gone. The loop re-renders only when `store.version` changes; producers run
   on 2-60s cadences against a 60fps panel, so re-rendering every frame would
@@ -493,6 +497,101 @@ on the panel, not from character counts.
   immediately after succeeds; `kill -9` leaves no stale lock and the next
   launch recovers. All six checks run from a script file, not an inline
   heredoc — the session 5 lesson about `$!`/`kill` losing its newlines.
+
+### 2026-09-18 — session 10 (polish pass before H2)
+No new features: closing out the drift H1's mid-session layout rewrite left
+behind, plus the two repo-level gaps that had been open since the start.
+Ordered so every behavior change had a test written against the *unmodified*
+code first — a test that only passes after the fix proves nothing.
+
+- **`tests/test_driver.py` (new, 12 cases)**: `driver.py` was the one module
+  in the frame path with no test, and the one whose failures are invisible
+  from Python — a wrong column offset or a mis-sliced page just draws in the
+  wrong place. Built with `object.__new__` and a recording fake `i2c_device`,
+  it pins the `+4` column offset read from `_column_offset` (NOTES.md: the
+  GDDRAM window is 4..131), the `width == 64` shift mirrored from `show()`,
+  the page-major buffer mirror, the `0x40` payload prefix, and that a
+  wrong-length `data` raises **before** the window is programmed. Written and
+  run green against unmodified source before anything else was touched.
+- **`views.fmt()` gained `transform=`**. The module docstring claimed every
+  value goes through `fmt()` — "scattering that check through the layout is
+  how a HUD ends up displaying one field's last-known number forever" — and
+  then `rows()` open-coded that exact check twice, for `sys.host` and
+  `sys.uptime`. The docstring was describing the failure mode it warns
+  against. `transform` runs between the reading and the spec (uptime seconds
+  → "5h18m") and is applied *after* the freshness check, so a stale reading
+  never reaches it. Behavior is unchanged and a test pinned that first: a
+  stale uptime still reads `up --`, not `--`, because the label stays outside
+  `fmt()` the same way `"cpu "` and `"dsk "` already do.
+- **`ProducerThread._due` is keyed by position, not by name.** Two producers
+  sharing a `name` silently collapsed into one entry and left one of them
+  never polled again. Also: an empty producer list raised
+  `ValueError: min() iterable argument is empty` from `poll_due()` —
+  `producers=` is public, and this was the one unguarded spot in a module
+  that is otherwise carefully defensive. It now returns `IDLE_INTERVAL`.
+- **`TTL_INTERVALS = 4` and a `Producer` base.** All seven producers picked a
+  TTL of exactly four intervals and all seven restated it as a second
+  literal, so the rule existed only as a coincidence a new producer had no
+  way to discover. `ttl` is now derived and overridable.
+- **`Memory.poll` guards its denominator** the way the adjacent `Disk.poll`
+  already did, and `parse_meminfo` now states its posture: `MemAvailable` is
+  required, and a kernel without it goes through the producer-error path to
+  `--` rather than falling back to `MemFree`, because a truthful `--` beats a
+  confident wrong number. (`parse_cpu_times` tolerates a short field list;
+  the two disagreeing silently was the actual problem.)
+- **The daemon sets up inside its `try`.** The lock, compositor, font and
+  producer thread were all acquired before it, so a failure during setup
+  skipped the `finally` and left the panel lit with whatever `force_full()`
+  had pushed — precisely the "panel in an unknown state" the module's
+  singleton-and-reset design exists to prevent. Verified as a regression
+  test: it fails against the pre-fix daemon (empty call list) and passes
+  after. The stop flag is now a `threading.Event`, matching `ProducerThread`
+  rather than being a third idiom in one call graph.
+- **`oled_hud/hud/__init__.py` now holds the panel geometry.** `WIDTH`/
+  `HEIGHT` were restated in `views.py` and `daemon.py` while `compositor.py`
+  said the same thing as `PAGES`/`WIDTH` — the same fact in two units with
+  nothing tying them together, even though `render_into` packs one straight
+  into the other. `PAGES` is derived from `HEIGHT` so the agreement is
+  structural. Added a `Driver` Protocol to `compositor.py` while there: the
+  tests pass a recorder, and that is the point.
+- **`scripts/build_fonts.py`**: `parse_bdf`'s annotation and docstring both
+  described a return value it doesn't produce (an `np.ndarray` 5-tuple; it
+  returns `(dwidth, bbx, rows)`). `build()` unpacked it correctly, so only
+  the documentation was wrong — the most misleading kind. Also dropped an
+  unreachable `else 0` and hoisted a loop-invariant `pad`. **Rebuild verified
+  byte-identical by checksum**, which is the only thing that makes edits to
+  this file safe.
+- **Docs**: this session's own session-9 notes said the disk row was the
+  optional one and contradicted themselves fifty lines later — a leftover of
+  the `row()` rewrite; fixed. README picked up `--fps`/`--lock-path`, the new
+  test file and the geometry module, and stopped claiming `sounddevice`
+  isn't installed.
+- **`requirements.txt`** (new): the `.env` venv was the only record of 30
+  packages, in a repo that already SHA-256s its vendored BDFs. Pinned from
+  the live venv, verified to match it exactly, grouped by what needs them,
+  with Pillow explicitly marked as *not* frame-path.
+- Type hints: constructors annotated across the five H1 modules, and
+  `Snapshot = dict[str, Reading]` named once in `store.py` instead of the
+  same type appearing bare in three files.
+
+#### Verified
+- 252 tests green (232 + 20 new). Test diffs are **104 insertions, 0
+  deletions** — no existing assertion was edited, which is what makes the
+  "Stage 3 changed no behavior" claim checkable rather than asserted.
+- Font rebuild byte-identical after the `build_fonts.py` edits.
+- Live, 60fps, Spleen: 1800 frames, 0 late, 0 dropped, 19 renders / 22 pushes
+  over 18 of 1800 frames — unchanged from the pre-polish baseline taken the
+  same session (20 renders / 23 pushes). Tom Thumb, 1200 frames: 0 late, 0
+  dropped, five lines with ld5/ld15 as the optional row, confirming on the
+  panel the thing the stale PROGRESS text had wrong.
+- Values checked against `/proc` read in the same process: uptime 10398s →
+  `2h53m`, load `0.88/0.65/0.48` → `ld 0.88` + `ld5 0.65` / `ld15 0.48`,
+  memory 576/905 → `mem 573/905M` (sampled a beat apart).
+- All six H3 lifecycle checks re-run from a script file: second launch exits
+  1 with "oled-hud already running"; `SIGTERM` exits 0 with both summaries
+  printed; relaunch immediately after succeeds; `kill -9` leaves no stale
+  lock. Plus a new sixth: a forced setup failure still clears the panel and
+  still releases the lock.
 
 ## Next up
 

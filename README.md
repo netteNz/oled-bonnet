@@ -12,7 +12,14 @@ for a Raspberry Pi.
 
 Dependencies live in the `.env` virtualenv (not `python-dotenv` — an actual
 venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
-`pytest` installed). Run scripts through it:
+`pytest` installed), pinned in `requirements.txt`:
+
+```
+python3 -m venv .env && .env/bin/pip install -r requirements.txt
+```
+
+Nothing here is installed as a package — the repo is run in place. Run
+scripts through the venv:
 
 ```
 .env/bin/python3 test.py
@@ -53,9 +60,10 @@ To run at 1MHz I2C instead of the Pi's 100kHz default, add
 `dtparam=i2c_arm_baudrate=1000000` to `/boot/firmware/config.txt` and reboot.
 
 `oled_hud/demos/audio_visualizer.py` and `oled_hud/demos/lufs_meter.py`
-additionally need a capture device and `sounddevice`, neither installed by
-default: `sudo apt install -y portaudio19-dev` (system package, needs
-`sudo`; provides the headers `sounddevice` builds against) then
+additionally need a capture device and `sounddevice`, neither part of the
+base setup (`sounddevice` is installed in this venv, from session 7 — a
+fresh one needs it): `sudo apt install -y portaudio19-dev` (system package,
+needs `sudo`; provides the headers `sounddevice` builds against) then
 `.env/bin/pip install sounddevice`. Run with `--list` first to see what
 `sounddevice` detects and pick the right `--device`. A USB headset's mic
 can't hear its own headphone output acoustically — if you want the
@@ -119,6 +127,10 @@ reachable Prometheus/node_exporter (`--url`, default
   `soak.py`/`analyze_soak.py` (including the no-I/O-in-the-frame-path
   constraint and both leak-shape directions the analyzer has to tell apart),
   for `oled_hud/hud/compositor.py` (a fake driver records `blit()` calls),
+  for `oled_hud/driver.py` (`test_driver.py` builds a `PartialSSD1305` with
+  no I2C behind it and asserts the GDDRAM window math — the `+4` column
+  offset, the 64-wide shift and the page-major buffer mirror — since every
+  way that can be wrong is invisible from Python),
   and for the Phase H1 modules — `test_font.py` checks generated glyphs
   against golden bitmaps transcribed from the BDFs (the check that catches a
   builder ignoring BBX offsets and flattening every descender onto the
@@ -142,11 +154,15 @@ reachable Prometheus/node_exporter (`--url`, default
   `ProducerThread` and a `SysView`, re-rendering only when `store.version`
   changes so almost every frame stays in the Compositor's push-nothing path
   (measured: 19 renders and 21 pushes over 1800 frames at 60fps). `--font`
-  picks the bitmap font, `--stats` prints the render/push counts. No PIL
-  anywhere in the loop. Entrypoint for `systemd/oled-hud.service`; see
+  picks the bitmap font and with it the line/column budget, `--fps` the frame
+  loop rate, `--lock-path` where the singleton `flock` lives, and `--stats`
+  prints the render/push counts on exit. No PIL anywhere in the loop. Entrypoint for `systemd/oled-hud.service`; see
   `PROGRESS.md`'s "HUD daemon" section for what's verified vs. what still
   needs the unit installed.
 - `systemd/oled-hud.service` — user unit template for the daemon above.
+- `oled_hud/hud/__init__.py` — the panel's geometry (`WIDTH`, `HEIGHT`, and
+  `PAGES` derived from it), in one place because `views.py` thinks in pixels
+  while `compositor.py` thinks in pages and the two have to agree.
 - `oled_hud/hud/store.py` — HUD daemon Phase H1: a thread-safe latest-value
   store shared between the producer thread and the render loop. One value
   per key, `snapshot()` copies everything under one lock, and staleness is

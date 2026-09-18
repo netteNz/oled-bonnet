@@ -6,11 +6,14 @@ import threading
 import pytest
 
 from oled_hud.hud.producers import (
+    IDLE_INTERVAL,
+    TTL_INTERVALS,
     CpuTemp,
     CpuUsage,
     Memory,
     ProducerThread,
     Uptime,
+    default_producers,
     format_uptime,
     parse_cpu_times,
     parse_meminfo,
@@ -247,3 +250,33 @@ def test_stop_interrupts_a_long_wait_instead_of_riding_it_out():
     done = threading.Event()
     threading.Thread(target=lambda: (thread.stop(), done.set()), daemon=True).start()
     assert done.wait(2.0)
+
+
+def test_an_empty_producer_list_idles_instead_of_raising():
+    # `producers=` is public, so an empty list is constructible. Everything
+    # else in this module degrades rather than raises; min() over an empty
+    # _due was the one place that didn't.
+    thread = ProducerThread(Store(), [], now=FakeClock())
+    assert thread.poll_due() == IDLE_INTERVAL
+
+
+def test_two_producers_sharing_a_name_both_get_polled():
+    # _due used to be keyed by producer.name, so a duplicate name silently
+    # collapsed two entries into one and left a producer never polled again.
+    clock = FakeClock()
+    a = FakeProducer("dupe", 1.0, values={"a": 1})
+    b = FakeProducer("dupe", 1.0, values={"b": 2})
+    thread = ProducerThread(Store(), [a, b], now=clock)
+
+    thread.poll_due()
+    clock.t += 1.0
+    thread.poll_due()
+
+    assert (a.calls, b.calls) == (2, 2)
+
+
+def test_every_default_producer_keeps_four_intervals_of_readings():
+    # The TTL rule, asserted rather than restated seven times: a producer has
+    # to miss four polls running before its fields go to "--".
+    for producer in default_producers():
+        assert producer.ttl == TTL_INTERVALS * producer.interval

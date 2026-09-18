@@ -29,9 +29,17 @@ class Font:
     `advance` is the cell width: the vendored fonts build their inter-character
     gap into the cell (Tom Thumb is a 3x5 glyph in a 4x6 cell), so laying text
     out is just `i * advance` with no kerning table.
+
+    `width` and `advance` are equal by construction here and both are kept on
+    purpose: `width` is how wide a glyph's bitmap is, `advance` is how far the
+    pen moves after drawing it. They are the same number only because every
+    vendored font is fixed-width -- code that lays text out should say
+    `advance`, and code that indexes the glyph array should say `width`, so a
+    proportional font would break at the right call sites rather than
+    silently misrender.
     """
 
-    def __init__(self, module):
+    def __init__(self, module: object):
         self.name = module.NAME
         self.width = module.CELL_W
         self.height = module.CELL_H

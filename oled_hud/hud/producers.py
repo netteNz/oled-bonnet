@@ -21,11 +21,24 @@ import os
 import socket
 import threading
 import time
+from collections.abc import Callable, Iterable
+
+from oled_hud.hud.store import Store
 
 # Picking a route for a UDP socket costs no packets, so this address never
 # has to be reachable -- TEST-NET-1 (RFC 5737) is used precisely because
 # nothing will ever answer on it.
 _ROUTE_PROBE = ("192.0.2.1", 9)
+
+# A reading is kept for this many polls' worth of time before it ages out.
+# One missed poll is a hiccup and shouldn't blank a field; four in a row is a
+# dead producer, which is exactly what the store's TTL exists to surface.
+TTL_INTERVALS = 4
+
+# How long poll_due() says to sleep when there is nothing to poll at all.
+# Only reachable with an empty producer list, which is constructible through
+# the public `producers=` argument.
+IDLE_INTERVAL = 1.0
 
 
 def parse_temp(text: str) -> float:
@@ -52,6 +65,12 @@ def parse_meminfo(text: str) -> tuple[float, float]:
     MemAvailable, not MemFree: free memory on Linux is mostly page cache the
     kernel will hand back on demand, so MemFree would show this Pi as nearly
     full while it is nearly idle.
+
+    MemAvailable is required, not optional -- unlike `parse_cpu_times`, which
+    tolerates a short field list. A kernel too old to publish it (pre-3.14)
+    would need MemFree, and MemFree is the wrong number; raising here sends
+    the memory row through the producer-error path to "--", which is a
+    truthful display, where MemFree would be a confident wrong one.
     """
     values = {}
     for line in text.splitlines():
@@ -80,7 +99,26 @@ def format_uptime(seconds: float) -> str:
     return f"{s // 86400}d{s % 86400 // 3600:02d}h"
 
 
-class _FileProducer:
+class Producer:
+    """Base for every producer: a name, a cadence, and the TTL rule.
+
+    `ttl` is derived rather than restated per producer so the four-intervals
+    rule is written down once and a new producer inherits it. Override the
+    property if a producer genuinely needs a different ratio.
+    """
+
+    name = ""
+    interval = 60.0
+
+    @property
+    def ttl(self) -> float:
+        return TTL_INTERVALS * self.interval
+
+    def poll(self) -> dict[str, object]:
+        raise NotImplementedError
+
+
+class _FileProducer(Producer):
     """Shared plumbing: a producer that reads one text file."""
 
     path = ""
@@ -97,10 +135,9 @@ class _FileProducer:
 class CpuTemp(_FileProducer):
     name = "cputemp"
     interval = 2.0
-    ttl = 8.0
     path = "/sys/class/thermal/thermal_zone0/temp"
 
-    def poll(self) -> dict:
+    def poll(self) -> dict[str, object]:
         return {"cpu.temp": parse_temp(self.read())}
 
 
@@ -115,14 +152,13 @@ class CpuUsage(_FileProducer):
 
     name = "cpuusage"
     interval = 2.0
-    ttl = 8.0
     path = "/proc/stat"
 
     def __init__(self, path: str | None = None):
         super().__init__(path)
         self._prev: tuple[int, int] | None = None
 
-    def poll(self) -> dict:
+    def poll(self) -> dict[str, object]:
         busy, total = parse_cpu_times(self.read())
         prev, self._prev = self._prev, (busy, total)
         if prev is None:
@@ -136,43 +172,43 @@ class CpuUsage(_FileProducer):
 class Memory(_FileProducer):
     name = "memory"
     interval = 5.0
-    ttl = 20.0
     path = "/proc/meminfo"
 
-    def poll(self) -> dict:
+    def poll(self) -> dict[str, object]:
         used, total = parse_meminfo(self.read())
-        return {"mem.used_mb": used, "mem.total_mb": total, "mem.pct": 100.0 * used / total}
+        return {
+            "mem.used_mb": used,
+            "mem.total_mb": total,
+            "mem.pct": 100.0 * used / total if total else 0.0,
+        }
 
 
 class Uptime(_FileProducer):
     name = "uptime"
     interval = 10.0
-    ttl = 40.0
     path = "/proc/uptime"
 
-    def poll(self) -> dict:
+    def poll(self) -> dict[str, object]:
         return {"sys.uptime": parse_uptime(self.read())}
 
 
-class LoadAvg:
+class LoadAvg(Producer):
     name = "loadavg"
     interval = 5.0
-    ttl = 20.0
 
-    def poll(self) -> dict:
+    def poll(self) -> dict[str, object]:
         one, five, fifteen = os.getloadavg()
         return {"load.1": one, "load.5": five, "load.15": fifteen}
 
 
-class Disk:
+class Disk(Producer):
     name = "disk"
     interval = 60.0
-    ttl = 240.0
 
     def __init__(self, path: str = "/"):
         self.path = path
 
-    def poll(self) -> dict:
+    def poll(self) -> dict[str, object]:
         st = os.statvfs(self.path)
         total = st.f_blocks * st.f_frsize
         free = st.f_bavail * st.f_frsize
@@ -183,14 +219,13 @@ class Disk:
         }
 
 
-class Host:
+class Host(Producer):
     """Hostname and the source address of the default route."""
 
     name = "host"
     interval = 60.0
-    ttl = 240.0
 
-    def poll(self) -> dict:
+    def poll(self) -> dict[str, object]:
         out = {"sys.host": socket.gethostname()}
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -203,7 +238,7 @@ class Host:
         return out
 
 
-def default_producers() -> list:
+def default_producers() -> list[Producer]:
     return [CpuTemp(), CpuUsage(), Memory(), Uptime(), LoadAvg(), Disk(), Host()]
 
 
@@ -216,7 +251,8 @@ class ProducerThread:
     as the poll-failure handling in `demos/telemetry_display.py`, generalized.
     """
 
-    def __init__(self, store, producers=None, *, now=time.monotonic):
+    def __init__(self, store: Store, producers: Iterable[Producer] | None = None,
+                 *, now: Callable[[], float] = time.monotonic):
         self.store = store
         self.producers = default_producers() if producers is None else list(producers)
         self._now = now
@@ -225,8 +261,11 @@ class ProducerThread:
         self.polls = 0
         self.errors = 0
         self.last_error: str | None = None
-        # Everything is due immediately, so the first frame has real data.
-        self._due = {p.name: 0.0 for p in self.producers}
+        # Keyed by position, not by name: two producers sharing a name would
+        # otherwise collapse into one entry and leave one of them never
+        # polled again. Everything is due immediately, so the first frame has
+        # real data.
+        self._due = [0.0] * len(self.producers)
 
     def poll_due(self) -> float:
         """Poll whatever is due now; return the seconds until the next one.
@@ -234,9 +273,11 @@ class ProducerThread:
         Split out from the run loop so a test can step it by hand without a
         thread or a sleep.
         """
+        if not self._due:
+            return IDLE_INTERVAL
         now = self._now()
-        for producer in self.producers:
-            if self._due[producer.name] > now:
+        for i, producer in enumerate(self.producers):
+            if self._due[i] > now:
                 continue
             try:
                 values = producer.poll()
@@ -247,8 +288,8 @@ class ProducerThread:
                 values = None
             if values:
                 self.store.put_all(values, ttl=producer.ttl)
-            self._due[producer.name] = now + producer.interval
-        return max(0.0, min(self._due.values()) - self._now())
+            self._due[i] = now + producer.interval
+        return max(0.0, min(self._due) - self._now())
 
     def _run(self) -> None:
         while not self._stop.is_set():

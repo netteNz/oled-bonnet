@@ -2,8 +2,9 @@
 
 Owns process lifecycle -- singleton lock, hardware reset before touching
 GDDRAM, `force_full()` so the first flush establishes known state, and a
-clean SIGTERM/SIGINT shutdown -- and drives a Store, a producer thread and a
-view on top of it.
+clean shutdown on either stop signal -- SIGTERM through a handler, SIGINT as
+the KeyboardInterrupt it already arrives as -- and drives a Store, a producer
+thread and a view on top of it.
 
 The lifecycle half exists because of the orphaned-`ticker.py` incident in
 PROGRESS.md session 5: two processes on the I2C bus corrupted the panel
@@ -28,6 +29,7 @@ import fcntl
 import os
 import signal
 import sys
+import threading
 
 import board
 import busio
@@ -35,14 +37,13 @@ import digitalio
 
 from oled_hud.clock import FrameClock
 from oled_hud.driver import PartialSSD1305
+from oled_hud.hud import HEIGHT, WIDTH
 from oled_hud.hud.compositor import Compositor
 from oled_hud.hud.font import load as load_font, names as font_names
 from oled_hud.hud.producers import ProducerThread
 from oled_hud.hud.store import Store
 from oled_hud.hud.views import SysView
 
-WIDTH = 128
-HEIGHT = 32
 FPS = 60.0
 DEFAULT_LOCK_PATH = os.path.expanduser("~/.oled-hud.lock")
 
@@ -75,9 +76,12 @@ def reset_display() -> PartialSSD1305:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--fps", type=float, default=FPS)
-    parser.add_argument("--font", choices=font_names(), default="spleen")
-    parser.add_argument("--lock-path", default=DEFAULT_LOCK_PATH)
+    parser.add_argument("--fps", type=float, default=FPS,
+                        help="frame loop rate")
+    parser.add_argument("--font", choices=font_names(), default="spleen",
+                        help="bitmap font; sets the line/column budget")
+    parser.add_argument("--lock-path", default=DEFAULT_LOCK_PATH,
+                        help="singleton flock path")
     parser.add_argument("--seconds", type=float, default=0.0,
                         help="run time; 0 runs until signalled")
     parser.add_argument("--stats", action="store_true",
@@ -90,21 +94,28 @@ def main(argv=None):
 
     lock = acquire_singleton_lock(args.lock_path)  # before any hardware I/O
     display = reset_display()
-    comp = Compositor(display)
-    comp.force_full()
 
-    stopping = []
-    signal.signal(signal.SIGTERM, lambda *_: stopping.append(True))
+    # Everything from here on is inside the try: force_full() has already
+    # been promised to the panel, so a failure while building the compositor,
+    # the font or the producer thread must still reach the finally that
+    # clears it. Setting up outside the try was how the panel could be left
+    # lit with a half-drawn frame -- the exact state this module exists to
+    # make impossible.
+    stopping = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopping.set())
 
-    store = Store()
-    producers = ProducerThread(store).start()
-    view = SysView(load_font(args.font))
-
+    producers = None
     clock = FrameClock(args.fps)
     seen = -1
     renders, pushes, frames_pushing = 0, 0, 0
     try:
-        while not stopping and not (args.seconds and clock.elapsed >= args.seconds):
+        comp = Compositor(display)
+        comp.force_full()
+        store = Store()
+        producers = ProducerThread(store).start()
+        view = SysView(load_font(args.font))
+
+        while not stopping.is_set() and (not args.seconds or clock.elapsed < args.seconds):
             version = store.version
             if version != seen:
                 view.render_into(comp.fb, store.snapshot(), store.now())
@@ -118,12 +129,14 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
-        producers.stop()
+        if producers is not None:
+            producers.stop()
         display.fill(0)
         display.show()
         lock.close()  # releases the flock
         print(clock.summary())
-        print(producers.summary())
+        if producers is not None:
+            print(producers.summary())
         if args.stats:
             print(f"renders: {renders}, pushes: {pushes} over {frames_pushing}/{clock.frames} frames")
 

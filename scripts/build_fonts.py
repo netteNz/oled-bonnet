@@ -39,8 +39,11 @@ FONTS = {
 OUT_DIR = "oled_hud/hud/fonts"
 
 
-def parse_bdf(text: str) -> tuple[int, int, dict[int, np.ndarray]]:
-    """Parse a BDF into (cell_h, font_y_offset, {codepoint: (bw, bh, bx, by, rows)}).
+def parse_bdf(text: str) -> tuple[int, int, dict[int, tuple[int, tuple[int, int, int, int], list[int]]]]:
+    """Parse a BDF into (cell_h, font_y_offset, {codepoint: (dwidth, bbx, rows)}).
+
+    `bbx` is the glyph's own (bw, bh, bx, by) bounding box and `rows` its raw
+    hex bitmap rows -- both raw BDF, left for `place()` to turn into pixels.
 
     Only what this builder needs: the font bounding box (for the cell height
     and the descent), and per glyph its own BBX plus the hex bitmap rows.
@@ -48,7 +51,7 @@ def parse_bdf(text: str) -> tuple[int, int, dict[int, np.ndarray]]:
     glyph still stores one byte per row with the low 5 bits unused.
     """
     cell_h = font_y = None
-    glyphs: dict[int, tuple] = {}
+    glyphs: dict[int, tuple[int, tuple[int, int, int, int], list[int]]] = {}
 
     code = bbx = dwidth = None
     rows: list[int] = []
@@ -76,7 +79,7 @@ def parse_bdf(text: str) -> tuple[int, int, dict[int, np.ndarray]]:
                 glyphs[code] = (dwidth, bbx, rows)
             code = bbx = dwidth = None
         elif reading:
-            rows.append(int(key, 16) if key else 0)
+            rows.append(int(key, 16))
 
     if cell_h is None:
         raise ValueError("no FONTBOUNDINGBOX in BDF")
@@ -97,12 +100,13 @@ def place(bw: int, bh: int, bx: int, by: int, rows: list[int],
     cell = np.zeros((cell_h, cell_w), dtype=bool)
     bottom = cell_h - (by - font_y)          # one past the glyph's last row
     top = bottom - bh
+    # Every row is left-aligned in a whole number of bytes, MSB first, so the
+    # padding is a property of the glyph's width, not of the row.
+    pad = (-bw) % 8
     for i, value in enumerate(rows[:bh]):
         y = top + i
         if not 0 <= y < cell_h:
             continue                          # glyph taller than the cell
-        # Row is left-aligned in a whole number of bytes, MSB first.
-        pad = (-bw) % 8
         for j in range(bw):
             x = bx + j
             if 0 <= x < cell_w and (value >> (bw + pad - 1 - j)) & 1:

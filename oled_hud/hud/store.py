@@ -19,6 +19,7 @@ Two properties the render loop depends on:
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -41,6 +42,11 @@ class Reading:
         return self.ttl <= 0 or (now - self.t) <= self.ttl
 
 
+#: What `Store.snapshot()` hands a view. Named so the three modules that pass
+#: one around say the same thing rather than degrading to a bare `dict`.
+Snapshot = dict[str, Reading]
+
+
 class Store:
     """Thread-safe map of key -> Reading.
 
@@ -48,12 +54,16 @@ class Store:
     time across a TTL boundary instead of sleeping through it.
     """
 
+    # Fallback for direct put()/put_all() callers that name no TTL. The
+    # producer thread always passes the producer's own ttl, so nothing in the
+    # daemon reaches this -- it exists so an ad-hoc put() still ages out
+    # rather than living forever.
     DEFAULT_TTL = 15.0
 
-    def __init__(self, *, now=time.monotonic):
+    def __init__(self, *, now: Callable[[], float] = time.monotonic):
         self._now = now
         self._lock = threading.Lock()
-        self._data: dict[str, Reading] = {}
+        self._data: Snapshot = {}
         self._version = 0
 
     @property
@@ -66,13 +76,13 @@ class Store:
         with self._lock:
             return self._version
 
-    def put(self, key: str, value, ttl: float | None = None) -> None:
+    def put(self, key: str, value: object, ttl: float | None = None) -> None:
         reading = Reading(key, value, self._now(), self.DEFAULT_TTL if ttl is None else ttl)
         with self._lock:
             self._data[key] = reading
             self._version += 1
 
-    def put_all(self, values: dict, ttl: float | None = None) -> None:
+    def put_all(self, values: dict[str, object], ttl: float | None = None) -> None:
         """Write a producer's whole poll result as one version bump, so the
         render loop never wakes to a partially-applied poll.
         """
@@ -89,7 +99,7 @@ class Store:
         with self._lock:
             return self._data.get(key)
 
-    def snapshot(self) -> dict[str, Reading]:
+    def snapshot(self) -> Snapshot:
         """A consistent copy of every entry. Readings are frozen, so the
         shallow copy is safe to hold across the render without a lock.
         """

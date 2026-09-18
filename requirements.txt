@@ -1,0 +1,57 @@
+# Pinned from the working .env venv on the Pi 3 B+ (Python 3.13, aarch64).
+# Recreate with:
+#
+#     python3 -m venv .env && .env/bin/pip install -r requirements.txt
+#
+# This repo is run in place, not installed -- there is no pyproject.toml and
+# nothing here is a package. See README.md's Setup section.
+#
+# Grouped by what actually needs them. Versions are the ones the recorded
+# BENCH.md numbers and the 30-minute soak in PROGRESS.md were measured
+# against, so a rebuild that changes them should re-run bench.py rather than
+# assume the timings carry over.
+
+# --- panel: driver, I2C and GPIO ---------------------------------------
+adafruit-circuitpython-ssd1305==1.4.6
+adafruit-circuitpython-framebuf==1.6.12
+adafruit-circuitpython-busdevice==5.2.17
+Adafruit-Blinka==9.2.0
+Adafruit-PlatformDetect==3.89.1
+Adafruit-PureIO==1.1.11
+lgpio==0.2.2.0
+RPi.GPIO==0.7.1
+
+# --- the frame path -----------------------------------------------------
+# numpy does all the packing and glyph indexing. Pillow is NOT in the frame
+# path and must never be: it is here for bench.py, walk.py, test.py, the
+# tape/ticker demos and tests/reference.py only. tests/test_views.py asserts
+# in a subprocess that importing the render path never pulls PIL in.
+numpy==2.5.3
+pillow==12.3.0
+
+# --- audio demos only (audio_visualizer.py, lufs_meter.py) --------------
+# Needs the portaudio headers first: sudo apt install -y portaudio19-dev
+sounddevice==0.5.6
+cffi==2.1.1
+pycparser==3.0
+
+# --- development --------------------------------------------------------
+pytest==9.1.1
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+py-spy==0.4.2
+Pygments==2.21.0
+
+# --- pulled in transitively by Blinka; listed so a rebuild is exact ------
+adafruit-circuitpython-connectionmanager==3.1.8
+adafruit-circuitpython-requests==4.1.17
+adafruit-circuitpython-typing==1.12.3
+Adafruit-Blinka-Raspberry-Pi5-Neopixel==1.0.0rc2
+binho-host-adapter==0.1.6
+pyftdi==0.57.2
+pyserial==3.5
+pyusb==1.3.1
+rpi_ws281x==5.0.0
+sysv_ipc==1.2.0
+typing_extensions==4.16.0

@@ -177,8 +177,9 @@ highest-probability failure).
 | Phase | What | Status | Artifacts |
 |---|---|---|---|
 | H0 | Compositor diff/coalesce engine | Done | `oled_hud/hud/compositor.py` (`Compositor`, `plan_run`, `cost`), `tests/test_compositor.py`, `oled_hud/demos/compositor_static.py` |
-| H1 | Store, producers, first real view | Not started | |
+| H1 | Store, producers, first real view | Done | `oled_hud/hud/store.py`, `producers.py`, `font.py`, `fonts/` (3 fonts + `scripts/build_fonts.py`, `fonts/*.bdf`), `views.py` (`SysView`), `tests/test_{font,store,producers,views}.py`, `oled_hud/demos/font_sampler.py`, `oled_hud/hud/__init__.py` (panel geometry) |
 | H3 | Lifecycle: singleton, reset, systemd | Code done, systemd unit not installed | `oled_hud/hud/daemon.py`, `tests/test_daemon.py`, `systemd/oled-hud.service` |
+| — | `driver.py` blit coverage (session 10) | Done | `tests/test_driver.py` |
 | H2 | Views, scheduler, preemption, transitions | Not started | |
 | H4 | Buttons and burn-in | Not started | |
 
@@ -377,17 +378,236 @@ outside the phase structure, ahead of H1's actual Store/producers/views.
   overlapping lines means less aliasing clutter at 128x32 1-bit
   resolution. Made `pyramid` the default shape.
 
+
+### 2026-09-17 — session 9 (Phase H1)
+Two decisions taken up front, both narrowing the handoff's scope on purpose:
+**local system metrics only** (no Prometheus/Pi-hole/Alertmanager, so H1
+needed no endpoint config outside the repo and no secrets — the remote path
+already exists and is proven in `scripts/prom_pull.py` and
+`demos/telemetry_display.py`), and **both fonts vendored, selectable**,
+because "is Tom Thumb still readable at 128x32" is a call that has to be made
+on the panel, not from character counts.
+
+- `scripts/build_fonts.py` + `fonts/`: offline BDF → generated-module builder,
+  never imported at runtime. Both BDFs come from one upstream
+  (`u8g2/tools/font/bdf/`) so they're the same vintage and format; committed
+  with SHA-256s and licensing in `fonts/NOTICE.md` (Spleen is BSD-2-Clause
+  with its full text vendored; Tom Thumb declares `COPYRIGHT "MIT"` in the
+  BDF but carries no author or license text, which `NOTICE.md` says plainly
+  rather than inventing an attribution). Output is a `.py` of base64-packed
+  bits — ~475 bytes for Spleen, ~285 for Tom Thumb, small enough that a
+  generated module beats a data file and keeps runtime file I/O at zero.
+  **The parsing detail that mattered**: BDF places a glyph by its own `BBX`
+  against the baseline, not by the cell. Spleen is uniform (every glyph
+  `BBX 5 8 0 -1`) so it would have survived a naive builder, but Tom Thumb
+  has 10+ distinct BBX shapes with real y-offsets — assuming `BBX == cell`
+  would have top-aligned every glyph and flattened `g`/`p`/`y` descenders
+  onto the baseline. Locked in by golden bitmaps in `tests/test_font.py`
+  that assert `g`'s bottom row is inked and `A`'s is not.
+  Also checked: no glyph in 32..126 is accidentally blank, and a rebuild is
+  byte-identical (verified by checksum, not by assumption).
+- `oled_hud/hud/font.py`: rendering a string is one fancy-index into a
+  `(95, h, w)` bool array plus a `transpose().reshape()` — no per-character
+  loop, no PIL, nothing to cache because nothing is expensive. `draw()`
+  clips instead of raising, since view layout is driven by live values whose
+  formatted width isn't known ahead of time and a long string should
+  truncate on the panel rather than take the daemon down.
+- `oled_hud/hud/store.py`: one value per key, always newest — same reasoning
+  that made `LatestBlock` right for the audio demos. Two properties the
+  render loop leans on: `snapshot()`/`put_all()` work under a single lock, so
+  a view can never draw half of one producer's poll next to half of the next;
+  and **staleness is derived on read from each entry's TTL**, so a producer
+  that dies needs nothing to notice its death — its key simply stops being
+  refreshed and ages out to `--`. That's the failure the class exists to
+  prevent: a frozen number that still looks live.
+- `oled_hud/hud/producers.py`: CPU temp, CPU usage, load, memory, uptime,
+  disk, hostname/IP. Judgment calls worth recording: `MemAvailable` not
+  `MemFree` (free memory on Linux is mostly reclaimable page cache, so
+  `MemFree` would show this 926MB Pi as nearly full while idle); `iowait`
+  counted as idle (a core blocked on a slow SD card isn't working);
+  `CpuUsage`'s first poll deliberately publishes **nothing**, since
+  `/proc/stat` is a since-boot counter and a single read gives an average
+  that never visibly moves on a machine up for hours. `Host` finds the local
+  IP by connecting a UDP socket to TEST-NET-1 (RFC 5737) — picking a route
+  sends no packets, and the address is chosen precisely because nothing will
+  ever answer on it. One thread runs everything: these are microsecond sysfs
+  reads, so per-producer threads would buy no concurrency and cost a stack
+  and a wakeup each against the frame loop.
+- `oled_hud/hud/views.py`: `SysView` owns no timer, no polling and no panel —
+  it turns a snapshot into pixels, which leaves H2's scheduler free to decide
+  *when* without the view having an opinion. Layout is computed from the font
+  (Spleen 4x25, Tom Thumb 5x32) and the 5/15-minute load row is marked
+  optional, so it's the row dropped when only four lines fit — disk rides
+  along on the memory and IP rows instead of being dropped, which is the
+  whole point of the packed layout further down this session. Every value
+  goes through one `fmt()` — the single place a stale reading becomes `--`,
+  including the two that need a conversion first, via its `transform` hook.
+- `oled_hud/hud/daemon.py`: `render_placeholder()` and the PIL import are
+  gone. The loop re-renders only when `store.version` changes; producers run
+  on 2-60s cadences against a 60fps panel, so re-rendering every frame would
+  rebuild an identical framebuffer hundreds of times per update.
+- 101 new tests, 232 total, all green. `tests/test_views.py` ends with the
+  handoff's standing criterion enforced rather than argued: a clean
+  subprocess imports every module a frame touches and asserts `PIL` never
+  appears in `sys.modules`.
+- Two bugs found, both in the tests rather than the code: a `FakeProducer`
+  whose `values or {...}` default swallowed a deliberate empty dict, and an
+  assertion that `{:.1f}` would round 51.55 up (it doesn't — the binary
+  double is just under).
+
+#### Live on hardware
+- `font_sampler.py`, both fonts, full printable ASCII: 360 frames at 30fps,
+  0 late, 0 dropped, **1/360 frames pushed anything** — the Compositor's
+  settle-to-zero case, unchanged by the new text path.
+- Daemon, Spleen, 20s at 60fps: 1200 frames, 0 late, 0 dropped, min slack
+  8.5ms of a 16.7ms budget. **13 renders, 16 pushes over 13 of 1200 frames**
+  — the version gate working: 1187 frames pushed nothing. 35 producer polls,
+  0 errors. Values matched `/proc` ground truth read in another shell.
+- **Font chosen live**: both fonts run at 60fps with 0 dropped, so the
+  decision was purely legibility, not cost. Judged with a throwaway A/B
+  (scratchpad, not repo code) that swapped fonts every 4s over the same live
+  data — comparing two 30-second runs separated by a gap tests memory, not
+  readability. Verdict: **Spleen reads better, but Tom Thumb's density was
+  what was wanted** — the size, not the shape.
+- **That tension has no font answer, and chasing one was the wrong move.**
+  First attempt was to vendor X11 misc-fixed `4x6` on the theory that a real
+  4-wide glyph would beat Tom Thumb's minimal 3x5 at the same cell size. It
+  doesn't: 691 inked pixels across ASCII 32..126 against Tom Thumb's 705, in
+  the same shapes. Five lines on a 32px panel means five rows of cap height,
+  and that is the resolution, not the typeface. Kept vendored as a third
+  option (`--font fixed4x6`, public domain) with that result written down in
+  `fonts/NOTICE.md` so nobody re-runs the experiment.
+- **The density actually came from the layout.** The two-field rows were
+  leaving ~40 dead columns across Spleen's four lines — a dozen in the
+  middle of each. `row()` now spreads N fields across the width (first flush
+  left, last flush right, middles evenly spaced), so row 2 carries cpu, temp
+  *and* load, and row 3 carries memory *and* disk. **Spleen now shows
+  everything Tom Thumb did, disk included, on four readable lines**, with
+  the IP row picking up disk-free-space in its leftover room. Worst case
+  (`cpu 100%` / `100.0C` / `ld 12.34`) is 24 of 25 columns — checked by a
+  test, not by eye, so a hot day doesn't turn the layout into a bug. The
+  optional row is now the 5/15-minute load detail, shown only by a font that
+  affords a fifth line.
+- **Spleen 5x8 stays the default.** Tom Thumb and fixed4x6 stay vendored and
+  selectable, since a dense H2 view may still want them.
+- H3 lifecycle re-verified against the new loop (it changed the frame body,
+  so the old verification no longer covered it): second launch exits 1 with
+  "oled-hud already running"; `SIGTERM` drains to exit 0 with both summaries
+  printed, meaning the `finally` ran and the panel was cleared; a relaunch
+  immediately after succeeds; `kill -9` leaves no stale lock and the next
+  launch recovers. All six checks run from a script file, not an inline
+  heredoc — the session 5 lesson about `$!`/`kill` losing its newlines.
+
+### 2026-09-18 — session 10 (polish pass before H2)
+No new features: closing out the drift H1's mid-session layout rewrite left
+behind, plus the two repo-level gaps that had been open since the start.
+Ordered so every behavior change had a test written against the *unmodified*
+code first — a test that only passes after the fix proves nothing.
+
+- **`tests/test_driver.py` (new, 12 cases)**: `driver.py` was the one module
+  in the frame path with no test, and the one whose failures are invisible
+  from Python — a wrong column offset or a mis-sliced page just draws in the
+  wrong place. Built with `object.__new__` and a recording fake `i2c_device`,
+  it pins the `+4` column offset read from `_column_offset` (NOTES.md: the
+  GDDRAM window is 4..131), the `width == 64` shift mirrored from `show()`,
+  the page-major buffer mirror, the `0x40` payload prefix, and that a
+  wrong-length `data` raises **before** the window is programmed. Written and
+  run green against unmodified source before anything else was touched.
+- **`views.fmt()` gained `transform=`**. The module docstring claimed every
+  value goes through `fmt()` — "scattering that check through the layout is
+  how a HUD ends up displaying one field's last-known number forever" — and
+  then `rows()` open-coded that exact check twice, for `sys.host` and
+  `sys.uptime`. The docstring was describing the failure mode it warns
+  against. `transform` runs between the reading and the spec (uptime seconds
+  → "5h18m") and is applied *after* the freshness check, so a stale reading
+  never reaches it. Behavior is unchanged and a test pinned that first: a
+  stale uptime still reads `up --`, not `--`, because the label stays outside
+  `fmt()` the same way `"cpu "` and `"dsk "` already do.
+- **`ProducerThread._due` is keyed by position, not by name.** Two producers
+  sharing a `name` silently collapsed into one entry and left one of them
+  never polled again. Also: an empty producer list raised
+  `ValueError: min() iterable argument is empty` from `poll_due()` —
+  `producers=` is public, and this was the one unguarded spot in a module
+  that is otherwise carefully defensive. It now returns `IDLE_INTERVAL`.
+- **`TTL_INTERVALS = 4` and a `Producer` base.** All seven producers picked a
+  TTL of exactly four intervals and all seven restated it as a second
+  literal, so the rule existed only as a coincidence a new producer had no
+  way to discover. `ttl` is now derived and overridable.
+- **`Memory.poll` guards its denominator** the way the adjacent `Disk.poll`
+  already did, and `parse_meminfo` now states its posture: `MemAvailable` is
+  required, and a kernel without it goes through the producer-error path to
+  `--` rather than falling back to `MemFree`, because a truthful `--` beats a
+  confident wrong number. (`parse_cpu_times` tolerates a short field list;
+  the two disagreeing silently was the actual problem.)
+- **The daemon sets up inside its `try`.** The lock, compositor, font and
+  producer thread were all acquired before it, so a failure during setup
+  skipped the `finally` and left the panel lit with whatever `force_full()`
+  had pushed — precisely the "panel in an unknown state" the module's
+  singleton-and-reset design exists to prevent. Verified as a regression
+  test: it fails against the pre-fix daemon (empty call list) and passes
+  after. The stop flag is now a `threading.Event`, matching `ProducerThread`
+  rather than being a third idiom in one call graph.
+- **`oled_hud/hud/__init__.py` now holds the panel geometry.** `WIDTH`/
+  `HEIGHT` were restated in `views.py` and `daemon.py` while `compositor.py`
+  said the same thing as `PAGES`/`WIDTH` — the same fact in two units with
+  nothing tying them together, even though `render_into` packs one straight
+  into the other. `PAGES` is derived from `HEIGHT` so the agreement is
+  structural. Added a `Driver` Protocol to `compositor.py` while there: the
+  tests pass a recorder, and that is the point.
+- **`scripts/build_fonts.py`**: `parse_bdf`'s annotation and docstring both
+  described a return value it doesn't produce (an `np.ndarray` 5-tuple; it
+  returns `(dwidth, bbx, rows)`). `build()` unpacked it correctly, so only
+  the documentation was wrong — the most misleading kind. Also dropped an
+  unreachable `else 0` and hoisted a loop-invariant `pad`. **Rebuild verified
+  byte-identical by checksum**, which is the only thing that makes edits to
+  this file safe.
+- **Docs**: this session's own session-9 notes said the disk row was the
+  optional one and contradicted themselves fifty lines later — a leftover of
+  the `row()` rewrite; fixed. README picked up `--fps`/`--lock-path`, the new
+  test file and the geometry module, and stopped claiming `sounddevice`
+  isn't installed.
+- **`requirements.txt`** (new): the `.env` venv was the only record of 30
+  packages, in a repo that already SHA-256s its vendored BDFs. Pinned from
+  the live venv, verified to match it exactly, grouped by what needs them,
+  with Pillow explicitly marked as *not* frame-path.
+- Type hints: constructors annotated across the five H1 modules, and
+  `Snapshot = dict[str, Reading]` named once in `store.py` instead of the
+  same type appearing bare in three files.
+
+#### Verified
+- 252 tests green (232 + 20 new). Test diffs are **104 insertions, 0
+  deletions** — no existing assertion was edited, which is what makes the
+  "Stage 3 changed no behavior" claim checkable rather than asserted.
+- Font rebuild byte-identical after the `build_fonts.py` edits.
+- Live, 60fps, Spleen: 1800 frames, 0 late, 0 dropped, 19 renders / 22 pushes
+  over 18 of 1800 frames — unchanged from the pre-polish baseline taken the
+  same session (20 renders / 23 pushes). Tom Thumb, 1200 frames: 0 late, 0
+  dropped, five lines with ld5/ld15 as the optional row, confirming on the
+  panel the thing the stale PROGRESS text had wrong.
+- Values checked against `/proc` read in the same process: uptime 10398s →
+  `2h53m`, load `0.88/0.65/0.48` → `ld 0.88` + `ld5 0.65` / `ld15 0.48`,
+  memory 576/905 → `mem 573/905M` (sampled a beat apart).
+- All six H3 lifecycle checks re-run from a script file: second launch exits
+  1 with "oled-hud already running"; `SIGTERM` exits 0 with both summaries
+  printed; relaunch immediately after succeeds; `kill -9` leaves no stale
+  lock. Plus a new sixth: a forced setup failure still clears the panel and
+  still releases the lock.
+
 ## Next up
 
-Two things need the user before more code gets written:
-- **Installing `systemd/oled-hud.service`** — `sudo loginctl
-  enable-linger`, `systemctl --user enable --now`, and the
-  `restart`/`kill -9`-under-systemd acceptance checks from the handoff.
-  Everything under the daemon's own control is already verified above.
-- **H1** needs the Prometheus / Pi-hole / Alertmanager endpoints (config
-  file outside the repo, per the handoff's security posture) and a font
-  choice to vendor via `scripts/build_fonts.py` (Spleen and Tom Thumb are
-  both handoff-approved). Inputs only the user can supply.
+**H2 (views, scheduler, preemption, transitions)** is now unblocked and is
+the next phase in the handoff's order: H1 landed exactly one view, and
+`SysView` was deliberately built with no timer and no panel of its own so a
+scheduler can own the "when". H4 (buttons, burn-in) follows.
 
-H2 (scheduler) and H4 (buttons/burn-in) follow once those land, per the
-handoff's stated order.
+Still waiting on the user, and independent of both:
+- **Installing `systemd/oled-hud.service`** — `sudo loginctl enable-linger`,
+  `systemctl --user enable --now`, and the `restart`/`kill -9`-under-systemd
+  acceptance checks from the handoff. Everything under the daemon's own
+  control is verified, most recently against the H1 loop in session 9.
+- **Remote producers** (Prometheus / Pi-hole / Alertmanager) whenever those
+  endpoints are wanted on the panel — they drop into the same `Producer`
+  protocol, but need the config file outside the repo that the handoff's
+  security posture calls for.
+
+Open since Phase 1 and still not blocking: `hw_scroll_spike.py`.

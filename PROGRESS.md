@@ -618,17 +618,23 @@ setup from session 7 needing to be re-established on rasp3.
 - **Capture-hardware investigation**, prompted by wanting a path that
   doesn't depend on the USB adapter: the onboard 3.5mm jack is confirmed
   output-only (`bcm2835 Headphones`: `0 in, 8 out` — a hardware limit, not
-  a config issue). Two alternatives confirmed feasible on this Pi but not
-  yet built: **Bluetooth** (`hci0` is up, PipeWire's Bluetooth backend
-  `libspa-0.2-bluetooth` is already installed — a paired headset's HSP/HFP
-  profile should need no code changes to show up as a `sounddevice`
-  capture device, at phone-call rather than hi-fi quality) and **I2S MEMS
-  mic** (INMP441/SPH0645-class; GPIO18-21 are free since this rig only uses
+  a config issue). Two alternatives have their *prerequisites* confirmed on
+  this Pi, but **neither has an actual working audio sink/source verified
+  end-to-end** — pairing was attempted and failed (below), and the I2S path
+  has no hardware connected at all, so both are unverified predictions, not
+  confirmed working paths: **Bluetooth** (`hci0` is up, PipeWire's
+  Bluetooth backend `libspa-0.2-bluetooth` is already installed — a paired
+  headset's HSP/HFP profile is *expected* to show up as a `sounddevice`
+  capture device with no code changes, but PortAudio may need pointing at a
+  `pulse`/`pipewire` virtual device rather than a raw `hw:X,Y` card the way
+  the HyperX does, and that's untested) and **I2S MEMS mic**
+  (INMP441/SPH0645-class; GPIO18-21 are free since this rig only uses
   SCL/SDA/`board.D4`, and `config.txt` already has `#dtparam=i2s=on`
   present, just commented out). Bluetooth pairing was attempted but no
   headset was found in an 8s scan — the candidate device likely wasn't
-  actually in pairing mode (powered-on isn't the same as discoverable);
-  not yet resolved.
+  actually in pairing mode (powered-on isn't the same as discoverable); no
+  device has been paired, so the whole chain past "the radio is up" is
+  unverified.
 - **Housekeeping note:** this session's number collides with H2's session
   11 on `hud-h2-scheduler`, since both branches fork from session 10. One
   will need renumbering when the branches merge back to `main`.

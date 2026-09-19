@@ -83,16 +83,21 @@ applied, swung from about -10 to +23dB, comfortably inside the default
 **Capture hardware, verified on rasp3 (session 12):** the onboard 3.5mm jack
 is output-only (`bcm2835 Headphones` reports `0 in, 8 out` — there's no way
 to make it a mic input). A USB audio adapter/headset (the setup above) is
-the default. Two no-USB alternatives were confirmed feasible but not yet
-wired up: a Bluetooth headset/mic, since the Pi 3B+'s onboard radio
-(`hci0`, `bluetoothctl`) and PipeWire's Bluetooth backend
+the default. Two no-USB alternatives have their *prerequisites* confirmed
+present but are **not tested end-to-end** — no BT audio sink/source has
+actually been verified through `sounddevice` yet, so treat both as
+unverified until one is: a Bluetooth headset/mic, since the Pi 3B+'s
+onboard radio (`hci0`, `bluetoothctl`) and PipeWire's Bluetooth backend
 (`libspa-0.2-bluetooth`) are both already present — pairing one and
-selecting its HSP/HFP (mic) profile should expose it as a normal
-`sounddevice` capture device with no code changes, at phone-call quality
-rather than hi-fi; and an I2S MEMS mic (INMP441/SPH0645-class, a few
-dollars), since this rig only uses SCL/SDA/`board.D4` for the OLED, leaving
-GPIO18-21 free, and `/boot/firmware/config.txt` already has
-`#dtparam=i2s=on` present, just commented out.
+selecting its HSP/HFP (mic) profile is *expected* to expose it as a
+`sounddevice` capture device with no code changes, but PortAudio's ALSA
+backend may need pointing at a `pulse`/`pipewire` virtual device rather
+than a raw `hw:X,Y` card the way the HyperX shows up, and that path hasn't
+been exercised; and an I2S MEMS mic (INMP441/SPH0645-class, a few dollars),
+since this rig only uses SCL/SDA/`board.D4` for the OLED, leaving GPIO18-21
+free, and `/boot/firmware/config.txt` already has `#dtparam=i2s=on`
+present, just commented out — this one is unverified even further, no
+hardware has been connected.
 
 `scripts/prom_pull.py` and `oled_hud/demos/telemetry_display.py` need a
 reachable Prometheus/node_exporter (`--url`, default

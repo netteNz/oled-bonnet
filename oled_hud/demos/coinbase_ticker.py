@@ -1,18 +1,24 @@
-"""HUD playground -- live BTC-USD price and your BTC holding, through the
-Compositor (H0), no Store/producers/scheduler scaffolding.
+"""HUD playground -- live price and holding value for each asset in
+HOLDINGS, through the Compositor (H0), no Store/producers/scheduler
+scaffolding.
 
-Price comes from a WebSocket `ticker` subscription (WSClient), pushed the
-instant it changes -- REST polling always has a visible lag between the
-market moving and the panel catching up. Holdings come from a slower REST
-poll (--poll-interval) instead: a balance doesn't move tick-to-tick the way
-a price does, so there's nothing to gain from streaming it, and it's one
+Price comes from a WebSocket `ticker` subscription (WSClient, one
+subscription covering every product in HOLDINGS), pushed the instant it
+changes -- REST polling always has a visible lag between the market moving
+and the panel catching up. Holdings come from a slower REST poll
+(--poll-interval) instead: a balance doesn't move tick-to-tick the way a
+price does, so there's nothing to gain from streaming it, and it's one
 fewer authenticated call fighting for the WS connection's attention. Same
 split the user's other Coinbase project uses between its ticker/user
 channels and its REST reconciliation.
 
-The frame loop only re-renders when price or balance actually changed since
-the last frame -- render_into() does real PIL work, and most frames between
-ticks have nothing new to draw.
+Each holding gets one row (`HEIGHT // len(HOLDINGS)` px tall) -- the panel
+is only 32px, so this is what fits BTC + SOL at the default font's ~13px
+line height without overlap; a third holding would need a smaller font.
+
+The frame loop only re-renders when any price or balance actually changed
+since the last frame -- render_into() does real PIL work, and most frames
+between ticks have nothing new to draw.
 
 Auth goes through the official `coinbase-advanced-py` SDK's RESTClient and
 WSClient, which build and sign the CDP JWT themselves and auto-detect the
@@ -49,8 +55,13 @@ from oled_hud.pack import pack_bits
 WIDTH = 128
 HEIGHT = 32
 
-PRODUCT_ID = "BTC-USD"
-HOLDING_CURRENCY = "BTC"
+# One row per entry, top to bottom -- see the module docstring for why two
+# is the practical limit at the default font.
+HOLDINGS = [
+    {"symbol": "BTC", "product_id": "BTC-USD", "currency": "BTC"},
+    {"symbol": "SOL", "product_id": "SOL-USD", "currency": "SOL"},
+]
+PRODUCT_IDS = [h["product_id"] for h in HOLDINGS]
 
 SECRETS_PATH = Path(__file__).resolve().parents[2] / ".env.secrets"
 
@@ -68,26 +79,27 @@ def load_secrets(path: Path = SECRETS_PATH) -> dict[str, str]:
 
 
 class LiveState:
-    """Latest price (written by the WS thread) and balance (written by the
-    frame-loop thread's REST poll), read by the frame loop -- a lock because
-    those are two different threads, not just for show."""
+    """Latest price per product_id (written by the WS thread) and latest
+    balance per currency (written by the frame-loop thread's REST poll),
+    read by the frame loop -- a lock because those are two different
+    threads, not just for show."""
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.price: float | None = None
-        self.balance: float | None = None
+        self.prices: dict[str, float] = {}
+        self.balances: dict[str, float] = {}
 
-    def set_price(self, price: float) -> None:
+    def set_price(self, product_id: str, price: float) -> None:
         with self._lock:
-            self.price = price
+            self.prices[product_id] = price
 
-    def set_balance(self, balance: float) -> None:
+    def set_balance(self, currency: str, balance: float) -> None:
         with self._lock:
-            self.balance = balance
+            self.balances[currency] = balance
 
-    def snapshot(self) -> tuple[float | None, float | None]:
+    def snapshot(self) -> tuple[dict[str, float], dict[str, float]]:
         with self._lock:
-            return self.price, self.balance
+            return dict(self.prices), dict(self.balances)
 
 
 def handle_ws_message(state: LiveState, raw_message: str) -> None:
@@ -103,13 +115,15 @@ def handle_ws_message(state: LiveState, raw_message: str) -> None:
         return
     for event in data.get("events", []):
         for ticker in event.get("tickers", []):
-            if ticker.get("product_id") == PRODUCT_ID and ticker.get("price") is not None:
-                state.set_price(float(ticker["price"]))
+            product_id = ticker.get("product_id")
+            if product_id in PRODUCT_IDS and ticker.get("price") is not None:
+                state.set_price(product_id, float(ticker["price"]))
 
 
-def fetch_btc_balance(client: RESTClient) -> float:
-    """Sum the BTC account(s), paginating get_accounts() to exhaustion --
-    a single unpaginated page can silently miss balances on later pages."""
+def fetch_balance(client: RESTClient, currency: str) -> float:
+    """Sum the account(s) for one currency, paginating get_accounts() to
+    exhaustion -- a single unpaginated page can silently miss balances on
+    later pages."""
     balance = 0.0
     cursor = None
     while True:
@@ -117,7 +131,7 @@ def fetch_btc_balance(client: RESTClient) -> float:
         for account in response.accounts or []:
             # available_balance comes back as a plain {"value", "currency"}
             # dict, not a nested typed object -- unlike Account itself.
-            if account.currency == HOLDING_CURRENCY and account.available_balance:
+            if account.currency == currency and account.available_balance:
                 balance += float(account.available_balance["value"])
         if not getattr(response, "has_next", False):
             break
@@ -127,14 +141,20 @@ def fetch_btc_balance(client: RESTClient) -> float:
     return balance
 
 
-def render_into(comp: Compositor, price: float, balance: float) -> None:
+def render_into(comp: Compositor, prices: dict[str, float], balances: dict[str, float]) -> None:
     """All PIL/font work happens here, off the frame path -- called only
-    when price or balance actually changed, not every frame."""
+    when any price or balance actually changed, not every frame."""
     font = ImageFont.load_default()
     img = Image.new("1", (WIDTH, HEIGHT))
     draw = ImageDraw.Draw(img)
-    draw.text((2, 2), f"BTC ${price:,.2f}", fill=255, font=font)
-    draw.text((2, 17), f"{balance:.6f} = ${balance * price:,.2f}", fill=255, font=font)
+    row_h = HEIGHT // len(HOLDINGS)
+    for i, holding in enumerate(HOLDINGS):
+        price = prices.get(holding["product_id"])
+        balance = balances.get(holding["currency"], 0.0)
+        if price is None:
+            continue
+        text = f"{holding['symbol']} {balance:.4f} = ${balance * price:,.2f}"
+        draw.text((2, i * row_h + 2), text, fill=255, font=font)
     bits = pack_bits(np.asarray(img, dtype=np.uint8) > 0)
     comp.fb[...] = bits
 
@@ -144,7 +164,7 @@ def parse_args(argv=None):
     parser.add_argument("--fps", type=float, default=10.0, help="frame loop rate")
     parser.add_argument(
         "--poll-interval", type=float, default=30.0,
-        help="seconds between BTC balance refreshes (price is WS-pushed, not polled)",
+        help="seconds between balance refreshes (prices are WS-pushed, not polled)",
     )
     parser.add_argument(
         "--seconds", type=float, default=0.0, help="run time; 0 runs until Ctrl+C"
@@ -158,16 +178,17 @@ def main(argv=None):
     client = RESTClient(api_key=creds["CDP_API_KEY"], api_secret=creds["CDP_API_SECRET"])
     state = LiveState()
 
-    # Seed both values up front so the panel isn't blank before the first
-    # WS tick / REST poll lands.
-    try:
-        state.set_price(float(client.get_product(PRODUCT_ID).price))
-    except Exception as exc:
-        print(f"initial price fetch failed: {exc}")
-    try:
-        state.set_balance(fetch_btc_balance(client))
-    except Exception as exc:
-        print(f"initial balance fetch failed: {exc}")
+    # Seed every price/balance up front so the panel isn't blank before the
+    # first WS tick / REST poll lands.
+    for holding in HOLDINGS:
+        try:
+            state.set_price(holding["product_id"], float(client.get_product(holding["product_id"]).price))
+        except Exception as exc:
+            print(f"initial price fetch failed for {holding['product_id']}: {exc}")
+        try:
+            state.set_balance(holding["currency"], fetch_balance(client, holding["currency"]))
+        except Exception as exc:
+            print(f"initial balance fetch failed for {holding['currency']}: {exc}")
 
     ws_client = WSClient(
         api_key=creds["CDP_API_KEY"],
@@ -175,7 +196,7 @@ def main(argv=None):
         on_message=lambda raw: handle_ws_message(state, raw),
     )
     ws_client.open()
-    ws_client.ticker([PRODUCT_ID])
+    ws_client.ticker(PRODUCT_IDS)
 
     i2c = busio.I2C(board.SCL, board.SDA)
     reset_pin = digitalio.DigitalInOut(board.D4)
@@ -187,22 +208,23 @@ def main(argv=None):
 
     clock = FrameClock(args.fps)
     next_poll = 0.0
-    last_rendered = (None, None)
+    last_rendered = ({}, {})
     balance_polls, balance_poll_errors = 0, 0
     try:
         while not args.seconds or clock.elapsed < args.seconds:
             if clock.elapsed >= next_poll:
-                try:
-                    state.set_balance(fetch_btc_balance(client))
-                    balance_polls += 1
-                except Exception as exc:
-                    balance_poll_errors += 1
-                    print(f"balance poll failed, keeping last reading: {exc}")
+                for holding in HOLDINGS:
+                    try:
+                        state.set_balance(holding["currency"], fetch_balance(client, holding["currency"]))
+                        balance_polls += 1
+                    except Exception as exc:
+                        balance_poll_errors += 1
+                        print(f"balance poll failed for {holding['currency']}, keeping last reading: {exc}")
                 next_poll = clock.elapsed + args.poll_interval
 
             current = state.snapshot()
-            if current != last_rendered and current[0] is not None:
-                render_into(comp, current[0], current[1] or 0.0)
+            if current != last_rendered and current[0]:
+                render_into(comp, *current)
                 last_rendered = current
 
             comp.flush()

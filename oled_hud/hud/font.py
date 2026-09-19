@@ -93,6 +93,22 @@ class Font:
         canvas[y + sy : y + ey, x + sx : x + ex] |= bits[sy:ey, sx:ex]
 
 
+def upscale(bits: np.ndarray, sx: int, sy: int | None = None) -> np.ndarray:
+    """Integer-repeat every pixel of a bool array into an `sx`x`sy` block.
+
+    Module-level rather than a `Font` method: this has nothing to do with
+    glyph storage, and works on any rendered bitmap (a whole string, not just
+    a single glyph). `sy` defaults to `sx` for uniform scaling. Used to build
+    large type -- a clock readout -- from an existing font instead of
+    vendoring a second, bigger one: `Font.render()` already returns a plain
+    bool array, so repeating pixels is exact and free of both a new BDF
+    source and a second entry in `fonts/NOTICE.md`.
+    """
+    if sy is None:
+        sy = sx
+    return np.repeat(np.repeat(bits, sy, axis=0), sx, axis=1)
+
+
 _CACHE: dict[str, Font] = {}
 
 

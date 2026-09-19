@@ -180,7 +180,7 @@ highest-probability failure).
 | H1 | Store, producers, first real view | Done | `oled_hud/hud/store.py`, `producers.py`, `font.py`, `fonts/` (3 fonts + `scripts/build_fonts.py`, `fonts/*.bdf`), `views.py` (`SysView`), `tests/test_{font,store,producers,views}.py`, `oled_hud/demos/font_sampler.py`, `oled_hud/hud/__init__.py` (panel geometry) |
 | H3 | Lifecycle: singleton, reset, systemd | Code done, systemd unit not installed | `oled_hud/hud/daemon.py`, `tests/test_daemon.py`, `systemd/oled-hud.service` |
 | — | `driver.py` blit coverage (session 10) | Done | `tests/test_driver.py` |
-| H2 | Views, scheduler, preemption, transitions | Not started | |
+| H2 | Views, scheduler, preemption, transitions | Code done, on-device numbers pending | `oled_hud/hud/scheduler.py`, `alerts.py`, `transition.py`, `views.py` (`View`, `ClockView`, `AlertView`), `font.py` (`upscale`), `daemon.py` (`run_loop`, new flags), `tests/test_{scheduler,alerts,transition}.py` |
 | H4 | Buttons and burn-in | Not started | |
 
 ### 2026-09-14 — session 6 (Phase H0)
@@ -593,12 +593,109 @@ code first — a test that only passes after the fix proves nothing.
   lock. Plus a new sixth: a forced setup failure still clears the panel and
   still releases the lock.
 
+### 2026-09-18 — session 11 (Phase H2)
+
+The original `oled-hud-handoff.md` that specified H0-H4 is not in this repo,
+so "views, scheduler, preemption, transitions" was the entire written spec
+for this phase. Three open questions -- what the second view is, what
+triggers preemption, how views transition -- were settled before writing any
+code: a big-type clock, threshold alerts, and a horizontal slide.
+
+- `oled_hud/hud/font.py`: `upscale()`, a module-level `np.repeat` over a
+  rendered bitmap's two axes. Chosen over vendoring a second, larger BDF
+  through `scripts/build_fonts.py` -- no new font file, no new
+  `fonts/NOTICE.md` entry, and Spleen 5x8 at x4 is exactly 32px tall, filling
+  the panel height by construction.
+- `oled_hud/hud/views.py`: a `View` base class (`name`, `refresh`, a shared
+  `render_into()`) that `SysView` now subclasses with zero behavior change --
+  `test_views.py`'s existing 25 cases needed no edited assertions, the same
+  bar session 10 held itself to. `ClockView` reads injected wall time
+  (`time.time`/`time.localtime`, both swappable for `time.gmtime` in tests)
+  rather than the monotonic clock everything else here is built on, and
+  deliberately puts the day-of-week rather than seconds in its gutter: with
+  `refresh=1.0` but `HH:MM` changing once a minute, a seconds readout would
+  turn 59 of every 60 renders from byte-identical (free) into genuinely
+  different (a push every second, forever). `AlertView` takes its alert via
+  `show()` rather than through `render()`'s signature, so the scheduler is
+  the only thing in H2 that knows `alerts.py` exists.
+- `oled_hud/hud/transition.py`: a horizontal slide over two packed
+  `(PAGES, WIDTH)` framebuffers. Free rather than merely cheap, because
+  `pack_bits`'s page-major MVLSB puts 8 vertical pixels in one byte per
+  *column* -- sliding sideways is `np.concatenate` of two slices, no
+  unpacking, no bit shifting, no PIL. A vertical slide would need bit shifts
+  across page boundaries and was never considered. `Slide.compose()`'s final
+  frame is required to be byte-identical to the target, or the Compositor
+  would diff a wasted second full push right after the slide already looked
+  finished; `retarget()` lets a producer poll landing mid-slide update the
+  incoming frame without restarting progress, since progress is a pure
+  function of elapsed time, not of the frame itself.
+- `oled_hud/hud/alerts.py`: `Rule`/`Alerts`, a threshold evaluator over a
+  `Snapshot` -- not a `Producer`. A producer's contract is poll-and-forget,
+  but alerts need to read the store, which would make `Store` both this
+  producer's input and its output and bump `version` on every evaluation,
+  recreating the exact render-gate problem H2 exists to solve one layer
+  down. Two flap guards, not one, because they defend different failure
+  modes: per-rule hysteresis (`clear`) handles sensor-level oscillation
+  around a threshold, and the scheduler's `min_alert` floor (below) handles
+  a condition that's genuinely brief. A stale reading never fires, matching
+  `views.fmt()`'s freshness discipline -- which means a dead thermal sensor
+  silently disables its own hot-CPU alarm; the honest fix is a separate
+  absence-keyed rule, deliberately not built here.
+- `oled_hud/hud/scheduler.py`: `Scheduler.frame()` replaces the H1
+  `version != seen` check with a disjunction -- a data change, a view's own
+  `refresh` cadence, a dwell timer expiring, or an alert appearing/clearing.
+  Takes the `Store`, not a `Snapshot`: calling `store.snapshot()` every frame
+  at 60fps would be 60 locked dict copies a second bought back for nothing,
+  so alert lookups read individual keys with `store.get()` instead, and a
+  full snapshot only happens on a frame that actually renders
+  (`test_the_scheduler_only_snapshots_when_it_renders` pins this). An alert
+  preempts immediately and, on clearing, resumes rotation at the
+  *interrupted* view with a fresh dwell rather than the remainder. The very
+  first switch to any view is always a hard cut regardless of
+  `--transition`, since there is nothing on screen yet to slide from.
+- `oled_hud/hud/daemon.py`: the frame loop's body moved into `run_loop()`,
+  drivable against a fake driver and a fake clock with no hardware --
+  `test_daemon.py` gained coverage of the render/push accounting the H2 gate
+  changes. New flags: `--views`, `--dwell`, `--transition{,-s}`,
+  `--no-alerts`. **Correctness note caught while wiring this up:** the loop
+  must pass `store.now()` to `sched.frame()`, not `clock.elapsed` --
+  `Reading.fresh()` compares against the same clock a reading was stamped
+  with (`Store`'s, `time.monotonic` by default), while `FrameClock.elapsed`
+  is a *different* clock zeroed at construction. Feeding the wrong one in
+  would have made every reading look permanently fresh or permanently stale
+  depending on which origin happened to be larger.
+- 73 new tests across `test_{font,views,transition,alerts,scheduler,daemon}.py`
+  (185 -> 258), house style throughout: plain asserts, module-level fakes,
+  a mutable-`t` `FakeClock`. `test_every_default_rule_names_a_key_a_producer_publishes`
+  cross-checks `default_rules()` against `producers.py`'s actual poll()
+  source (regex over `inspect.getsource`, not a call to poll() itself, which
+  needs real `/proc`/`/sys` files this doesn't have off a Pi) -- catches a
+  renamed store key at test time instead of as a silently-never-firing
+  alarm. The no-PIL subprocess test's import list now covers all three new
+  modules.
+- **Cost, priced against the compositor model rather than guessed:** a slide
+  frame dirties every column of every page, so `plan_run()` picks the union
+  -- one 512-byte push at `cost(4,128)` = 0.6 + 512*0.009 = 5.21ms (matches
+  BENCH.md's measured 5.18-5.22ms, so the model is being used inside its
+  calibration range). At 0.3s/60fps that's ~18 frames, ~94ms of I2C per
+  transition, ~1.1% duty at an 8s dwell -- and the H1 "99% of frames push
+  nothing" headline becomes ~95% at that dwell. Real, deliberate, and
+  recoverable exactly via `--transition none`, which is also the control for
+  the live A/B still to run on the actual panel.
+- **Not yet done: on-device verification.** Windows has no I2C bus and the
+  five hardware-dependent test modules (`test_{daemon,driver,effects,pack,soak}.py`)
+  don't run here, so `run_loop()`/`build_views()`/`parse_args()` were smoke-
+  tested against stubbed `board`/`busio`/`digitalio`/`adafruit_ssd1305`/
+  `fcntl` modules (not committed) rather than real hardware. Still needed on
+  the Pi: the three-config push-count table above with real numbers, the
+  six H3 lifecycle checks re-run against the new loop (session 9's rule --
+  the frame body changed again), a forced-alert check, and an eyeball
+  verdict on x4 Spleen legibility.
+
 ## Next up
 
-**H2 (views, scheduler, preemption, transitions)** is now unblocked and is
-the next phase in the handoff's order: H1 landed exactly one view, and
-`SysView` was deliberately built with no timer and no panel of its own so a
-scheduler can own the "when". H4 (buttons, burn-in) follows.
+**H4 (buttons, burn-in)** is the next phase in the handoff's order, once H2's
+on-device numbers above are recorded.
 
 Still waiting on the user, and independent of both:
 - **Installing `systemd/oled-hud.service`** — `sudo loginctl enable-linger`,

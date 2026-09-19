@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from oled_hud.hud.font import Font, load, names
+from oled_hud.hud.font import Font, load, names, upscale
 
 # Golden bitmaps, transcribed from the BDF sources by eye. These are the
 # check that scripts/build_fonts.py placed glyphs against the baseline
@@ -197,3 +197,50 @@ def test_isolated_font_instances_are_independent():
     a, b = Font(mod), Font(mod)
     assert a.glyphs is not b.glyphs
     assert np.array_equal(a.glyphs, b.glyphs)
+
+
+# -- upscale() ----------------------------------------------------------
+
+def test_upscale_repeats_each_pixel_into_a_block():
+    bits = np.array([[True, False], [False, True]])
+    out = upscale(bits, 2)
+    expected = np.array([
+        [True, True, False, False],
+        [True, True, False, False],
+        [False, False, True, True],
+        [False, False, True, True],
+    ])
+    assert np.array_equal(out, expected)
+
+
+def test_upscale_preserves_shape_ratio():
+    bits = np.zeros((8, 5), dtype=bool)
+    assert upscale(bits, 4).shape == (32, 20)
+
+
+def test_upscale_supports_independent_x_and_y_factors():
+    bits = np.zeros((8, 5), dtype=bool)
+    assert upscale(bits, 3, 2).shape == (16, 15)
+
+
+def test_upscale_by_one_is_the_identity():
+    bits = np.array([[True, False], [False, True]])
+    assert np.array_equal(upscale(bits, 1), bits)
+
+
+def test_upscale_of_an_empty_render_is_empty():
+    bits = np.zeros((8, 0), dtype=bool)
+    assert upscale(bits, 4).shape == (32, 0)
+
+
+def test_spleen_at_four_x_fills_the_panel_height(spleen):
+    # This is the number ClockView's layout depends on: 8px cell x4 == the
+    # full 32px panel height, so a big clock needs no separate vertical fit.
+    bits = spleen.render("A")
+    assert upscale(bits, 4).shape[0] == 32
+
+
+def test_a_five_character_clock_fits_the_width(spleen):
+    # "12:34" at x4 must fit the 128px panel with room for a gutter.
+    width = upscale(spleen.render("12:34"), 4).shape[1]
+    assert width <= 128

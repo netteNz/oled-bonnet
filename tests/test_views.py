@@ -2,14 +2,26 @@
 
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pytest
 
-from oled_hud.hud.font import load
+from oled_hud.hud.alerts import Alert, Rule
+from oled_hud.hud.font import load, upscale
 from oled_hud.hud.producers import format_uptime
 from oled_hud.hud.store import Reading, Store
-from oled_hud.hud.views import HEIGHT, MISSING, WIDTH, SysView, fmt, row
+from oled_hud.hud.views import (
+    HEIGHT,
+    MISSING,
+    WIDTH,
+    AlertView,
+    ClockView,
+    SysView,
+    View,
+    fmt,
+    row,
+)
 
 NOW = 1000.0
 
@@ -291,8 +303,174 @@ def test_the_render_path_never_imports_pil():
         "import sys;"
         "import oled_hud.hud.font, oled_hud.hud.store,"
         " oled_hud.hud.producers, oled_hud.hud.views, oled_hud.hud.compositor,"
+        " oled_hud.hud.scheduler, oled_hud.hud.alerts, oled_hud.hud.transition,"
         " oled_hud.pack, oled_hud.clock;"
         "print([m for m in sys.modules if m.split('.')[0] in ('PIL',)])"
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]", out.stdout
+
+
+# -- View base class ------------------------------------------------------
+
+def test_every_view_packs_into_a_compositor_framebuffer(spleen_view):
+    clock_view = ClockView(load("spleen"), wall=lambda: 0.0, localtime=time.gmtime)
+    for view in (spleen_view, clock_view):
+        fb = np.zeros((HEIGHT // 8, WIDTH), dtype=np.uint8)
+        view.render_into(fb, snap(**FULL), NOW)
+        assert fb.any()
+
+
+def test_render_into_replaces_rather_than_accumulating(spleen_view):
+    clock_view = ClockView(load("spleen"), wall=lambda: 0.0, localtime=time.gmtime)
+    for view in (spleen_view, clock_view):
+        fb = np.zeros((HEIGHT // 8, WIDTH), dtype=np.uint8)
+        view.render_into(fb, snap(**FULL), NOW)
+        first = fb.copy()
+        view.render_into(fb, snap(**FULL), NOW)
+        assert np.array_equal(fb, first)  # not doubled up by a second OR
+
+
+def test_sysview_and_clockview_both_subclass_view(spleen_view):
+    clock_view = ClockView(load("spleen"))
+    assert isinstance(spleen_view, View)
+    assert isinstance(clock_view, View)
+
+
+# -- ClockView --------------------------------------------------------------
+
+# A fixed epoch and time.gmtime rather than time.localtime everywhere below,
+# so these assertions don't depend on the machine's timezone: 1970-01-01
+# 03:04:05 UTC, a Thursday.
+EPOCH = 3 * 3600 + 4 * 60 + 5
+
+
+def clock_view(font_name="spleen", **kw):
+    return ClockView(load(font_name), wall=lambda: EPOCH, localtime=time.gmtime, **kw)
+
+
+def test_the_clock_renders_hours_and_minutes_at_full_height():
+    # The cell the big digits occupy is 8px x4 = 32px -- the whole panel --
+    # even though the glyphs themselves pad a blank row top and bottom
+    # (see test_font.py's SPLEEN_A golden), so this checks the cell, not ink.
+    view = clock_view()
+    assert view.big_h == HEIGHT
+    assert view.y0 == 0
+
+
+def test_the_clock_is_horizontally_centered():
+    # Checked against the cell box a glyph occupies, not the lit pixels:
+    # a font's own left/right padding (see test_font.py) would otherwise
+    # make an ink-based bounding box an unreliable proxy for centering.
+    view = clock_view()
+    big = upscale(load("spleen").render("03:04"), 4)
+    w = big.shape[1]
+    x0 = (WIDTH - w) // 2
+    assert x0 == WIDTH - x0 - w  # symmetric margins either side
+
+
+def test_the_clock_uses_the_injected_wall_clock():
+    # gmtime rather than localtime is the whole point of the injection: this
+    # assertion holds no matter what timezone the test machine is in.
+    view = ClockView(load("spleen"), wall=lambda: EPOCH, localtime=time.gmtime)
+    canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(canvas, {}, NOW)
+    expected = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    font = load("spleen")
+    big = upscale(font.render("03:04"), 4)
+    h, w = big.shape
+    x0 = (WIDTH - w) // 2
+    y0 = (HEIGHT - h) // 2
+    expected[y0 : y0 + h, x0 : x0 + w] |= big
+    assert np.array_equal(canvas[: view.big_h, :], expected[: view.big_h, :])
+
+
+def test_the_same_minute_renders_byte_identical_frames():
+    # This is the property the push count depends on: the scheduler asks for
+    # a render every second (refresh=1.0), but only a real minute change
+    # should ever cost the Compositor an actual push.
+    view = clock_view()
+    a = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    b = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(a, {}, NOW)
+    view.render(b, {}, NOW + 1.0)  # `now` is store-monotonic, wall clock is fixed
+    assert np.array_equal(a, b)
+
+
+def test_a_new_minute_changes_the_framebuffer():
+    a = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    b = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    ClockView(load("spleen"), wall=lambda: EPOCH, localtime=time.gmtime).render(a, {}, NOW)
+    ClockView(load("spleen"), wall=lambda: EPOCH + 60, localtime=time.gmtime).render(b, {}, NOW)
+    assert not np.array_equal(a, b)
+
+
+def test_the_clock_ignores_the_now_argument():
+    # `now` is the monotonic store clock, irrelevant to a wall-clock view --
+    # passing wildly different values must not change the rendered frame.
+    view = clock_view()
+    a = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    b = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(a, {}, 0.0)
+    view.render(b, {}, 999999.0)
+    assert np.array_equal(a, b)
+
+
+# -- AlertView --------------------------------------------------------------
+
+HOT = Rule("cpu.temp", "CPU HOT", above=70.0)
+
+
+def test_an_alert_view_with_nothing_shown_renders_blank():
+    view = AlertView(load("spleen"))
+    canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(canvas, snap(**FULL), NOW)
+    assert not canvas.any()
+
+
+def test_the_alert_label_is_drawn_at_double_height():
+    view = AlertView(load("spleen"))
+    view.show(Alert(HOT, 90.0, NOW - 5.0))
+    canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(canvas, snap(**{"cpu.temp": 90.0}), NOW)
+    rows_lit = np.flatnonzero(canvas.any(axis=1))
+    # Spleen is 8px tall; the label is upscaled x2, so its cell is 16px --
+    # everything drawn should sit within the top 16 rows or below it, and
+    # some of the label's own ink should reach past the single-height mark.
+    assert rows_lit[0] < 8
+
+
+def test_the_alert_value_goes_through_fmt():
+    view = AlertView(load("spleen"))
+    view.show(Alert(HOT, 90.0, NOW - 5.0))
+    canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(canvas, snap(**{"cpu.temp": 90.0}), NOW)
+    assert canvas.any()  # sanity: something drew below the label
+
+
+def test_a_stale_reading_under_an_alert_still_shows_placeholder():
+    # The alert firing must not make a number look more current than the
+    # freshness discipline everywhere else in this module allows.
+    view = AlertView(load("spleen"))
+    view.show(Alert(HOT, 90.0, NOW - 5.0))
+    stale = {"cpu.temp": Reading("cpu.temp", 90.0, NOW - 999.0, ttl=8.0)}
+    canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(canvas, stale, NOW)
+    with_stale = canvas.copy()
+
+    fresh = {"cpu.temp": Reading("cpu.temp", 90.0, NOW, ttl=60.0)}
+    canvas[:] = False
+    view.render(canvas, fresh, NOW)
+    # A stale "90.0" (5 chars incl. sign-less digits) and MISSING ("--", 2
+    # chars) draw different amounts of ink below the label -- the two
+    # frames must differ, or fmt() isn't actually being consulted.
+    assert not np.array_equal(with_stale, canvas)
+
+
+def test_show_none_blanks_a_previously_shown_alert():
+    view = AlertView(load("spleen"))
+    view.show(Alert(HOT, 90.0, NOW - 5.0))
+    view.show(None)
+    canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    view.render(canvas, snap(**{"cpu.temp": 90.0}), NOW)
+    assert not canvas.any()

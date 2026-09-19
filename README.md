@@ -35,6 +35,7 @@ scripts through the venv:
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --list
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --bars 32
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --style mirror
+.env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --floor -80
 .env/bin/python3 -m oled_hud.demos.lufs_meter --device 1 --floor -90 --ceil -50
 .env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
@@ -70,7 +71,28 @@ needs `sudo`; provides the headers `sounddevice` builds against) then
 can't hear its own headphone output acoustically — if you want the
 visualizer/meter reacting to something playing over headphones, route it
 with a physical cable (headphone-out to mic-in) rather than relying on the
-mic to pick it up from the air.
+mic to pick it up from the air. Both demos take `--floor`/`--ceil` (dB) to
+tune the display range for a weak input chain — a phone's headphone-out
+through a USB-C-to-3.5mm cable into a mic-in never reaches line level, so
+the default range can sit close to the floor. `audio_visualizer.py`'s
+default range worked fine as measured against that exact chain (rasp3,
+session 12): the actual per-band FFT magnitude, with the frequency tilt
+applied, swung from about -10 to +23dB, comfortably inside the default
+-60/0 range, even though the raw time-domain level was only around -59dBFS.
+
+**Capture hardware, verified on rasp3 (session 12):** the onboard 3.5mm jack
+is output-only (`bcm2835 Headphones` reports `0 in, 8 out` — there's no way
+to make it a mic input). A USB audio adapter/headset (the setup above) is
+the default. Two no-USB alternatives were confirmed feasible but not yet
+wired up: a Bluetooth headset/mic, since the Pi 3B+'s onboard radio
+(`hci0`, `bluetoothctl`) and PipeWire's Bluetooth backend
+(`libspa-0.2-bluetooth`) are both already present — pairing one and
+selecting its HSP/HFP (mic) profile should expose it as a normal
+`sounddevice` capture device with no code changes, at phone-call quality
+rather than hi-fi; and an I2S MEMS mic (INMP441/SPH0645-class, a few
+dollars), since this rig only uses SCL/SDA/`board.D4` for the OLED, leaving
+GPIO18-21 free, and `/boot/firmware/config.txt` already has
+`#dtparam=i2s=on` present, just commented out.
 
 `scripts/prom_pull.py` and `oled_hud/demos/telemetry_display.py` need a
 reachable Prometheus/node_exporter (`--url`, default

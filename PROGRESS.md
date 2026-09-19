@@ -593,12 +593,55 @@ code first — a test that only passes after the fix proves nothing.
   lock. Plus a new sixth: a forced setup failure still clears the panel and
   still releases the lock.
 
+### 2026-09-19 — session 11 (audio pickup, outside the phase structure)
+
+Not H2 work — a separate branch (`audio-visualizer-floor-ceil`, off `main`)
+for the audio demos, prompted by the HyperX USB adapter + phone-over-cable
+setup from session 7 needing to be re-established on rasp3.
+
+- `oled_hud/demos/audio_visualizer.py`: added `--floor`/`--ceil`, mirroring
+  `lufs_meter.py`'s existing knob for the same reason — a phone's
+  headphone-out through a USB-C-to-3.5mm cable into a mic-in never reaches
+  line level. Verified against the real chain before assuming it was
+  needed: raw time-domain level measured only ~-59dBFS (right at the old
+  hardcoded `DB_FLOOR=-60`), but the actual per-band FFT magnitude the
+  visualizer uses, with the frequency tilt applied, swung -10 to +23dB —
+  comfortably inside the existing -60/0 default. The flags are added
+  anyway, for a quieter chain than this one; today's setup didn't need an
+  override.
+- Confirmed live on rasp3: the HyperX (`hw:2,0`, `Sound [HyperX Virtual
+  Surround Sound]`) is detected once plugged in, `amixer -c 2 sget Headset`
+  showed capture already at 100%/unmuted, and the visualizer ran clean at
+  30fps (0 late, 0 dropped) with bars visibly reacting to phone audio
+  (confirmed by eye, not just by the absence of errors) in the default
+  `bars` style — `mirror` was tried and the plain `bars` style preferred.
+- **Capture-hardware investigation**, prompted by wanting a path that
+  doesn't depend on the USB adapter: the onboard 3.5mm jack is confirmed
+  output-only (`bcm2835 Headphones`: `0 in, 8 out` — a hardware limit, not
+  a config issue). Two alternatives confirmed feasible on this Pi but not
+  yet built: **Bluetooth** (`hci0` is up, PipeWire's Bluetooth backend
+  `libspa-0.2-bluetooth` is already installed — a paired headset's HSP/HFP
+  profile should need no code changes to show up as a `sounddevice`
+  capture device, at phone-call rather than hi-fi quality) and **I2S MEMS
+  mic** (INMP441/SPH0645-class; GPIO18-21 are free since this rig only uses
+  SCL/SDA/`board.D4`, and `config.txt` already has `#dtparam=i2s=on`
+  present, just commented out). Bluetooth pairing was attempted but no
+  headset was found in an 8s scan — the candidate device likely wasn't
+  actually in pairing mode (powered-on isn't the same as discoverable);
+  not yet resolved.
+- **Housekeeping note:** this session's number collides with H2's session
+  11 on `hud-h2-scheduler`, since both branches fork from session 10. One
+  will need renumbering when the branches merge back to `main`.
+
 ## Next up
 
 **H2 (views, scheduler, preemption, transitions)** is now unblocked and is
 the next phase in the handoff's order: H1 landed exactly one view, and
 `SysView` was deliberately built with no timer and no panel of its own so a
 scheduler can own the "when". H4 (buttons, burn-in) follows.
+
+Also open: pairing a Bluetooth headset for audio capture on rasp3 (session
+11 above) — needs the device actually put into pairing mode before a rescan.
 
 Still waiting on the user, and independent of both:
 - **Installing `systemd/oled-hud.service`** — `sudo loginctl enable-linger`,

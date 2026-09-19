@@ -297,10 +297,11 @@ either an Ed25519 or an EC secret.
   text through the real Compositor. Polling (`--poll-interval`) runs on
   its own cadence, decoupled from the frame loop (`--fps`) — a poll
   failure keeps showing the last good reading instead of crashing.
-- `oled_hud/demos/coinbase_ticker.py` — live BTC-USD price and BTC holding
-  through the Compositor, same poll/frame-loop split as
-  `telemetry_display.py`. Auth via the official `coinbase-advanced-py`
-  SDK's `RESTClient`, credentials from `.env.secrets` (see Setup above).
+- `oled_hud/demos/coinbase_ticker.py` — live price and holding value for
+  each asset in its `HOLDINGS` list (BTC, SOL) through the Compositor, one
+  row per holding, same poll/frame-loop split as `telemetry_display.py`.
+  Auth via the official `coinbase-advanced-py` SDK's `RESTClient`,
+  credentials from `.env.secrets` (see Setup above).
 
 ## Open Items
 

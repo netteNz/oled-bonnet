@@ -41,6 +41,8 @@ scripts through the venv:
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
 .env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
 .env/bin/python3 -m oled_hud.demos.coinbase_ticker --poll-interval 15
+.env/bin/python3 -m oled_hud.demos.idle_clock
+.env/bin/python3 -m oled_hud.demos.idle_clock --12h
 .env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
 .env/bin/python3 -m oled_hud.hud.daemon
 .env/bin/python3 -m oled_hud.hud.daemon --font fixed4x6 --seconds 20 --stats
@@ -276,6 +278,15 @@ either an Ed25519 or an EC secret.
   row per holding, same poll/frame-loop split as `telemetry_display.py`.
   Auth via the official `coinbase-advanced-py` SDK's `RESTClient`,
   credentials from `.env.secrets` (see Setup above).
+- `oled_hud/demos/idle_clock.py` — screensaver-style idle display: big
+  seven-segment-style digits (hand-drawn rectangles, no PIL) with a
+  blinking colon, plus a weekday/date line in the vendored Spleen font.
+  `--12h` switches to a 12-hour clock with an AM/PM corner label. Redraws
+  only on a minute boundary or a colon blink, same change-gated pattern as
+  `coinbase_ticker.py`. The whole composition drifts a few pixels along a
+  slow ~37-minute circular path so an idle screen doesn't park the same
+  glyph shapes on the same OLED cells for hours — a stopgap for burn-in
+  ahead of H4, which is still not started.
 
 ## Status
 

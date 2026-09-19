@@ -308,11 +308,12 @@ vendored bitmap fonts with no PIL in the frame path.
 The H1 baseline (one static view, no transitions) measured 19 renders and 21
 pushes over 1800 frames at 60fps — over 99% of frames pushed nothing.
 Rotating between two views on an 8s dwell with a 0.3s slide spends some of
-that deliberately: `compositor.cost(4,128)` prices a full-width slide push at
-~5.2ms, so an 8s dwell cycle costs ~1.1% I2C duty and the push-nothing figure
-becomes ~95% rather than ~99% — recoverable via `--transition none`, which
-restores the H1 number exactly. *(On-device numbers for the actual panel are
-still pending — see `PROGRESS.md`.)* H4 (buttons, burn-in) is next; the
+that deliberately: verified on the real panel at 30s/60fps, that config did
+81 renders and 64 pushes over 1800 frames (62 pushing, 96.6% pushed nothing);
+dwell 30s or `--transition none` lands within noise of the H1 number. All
+three ran with 0 late, 0 dropped, and 6.4-6.9ms of the 16.7ms budget to
+spare. See `PROGRESS.md` session 11 for the full table, the forced-alert
+check and the re-run H3 lifecycle checks. H4 (buttons, burn-in) is next; the
 `systemd` unit is still uninstalled and needs a one-time `sudo`.
 
 FPS and scroll-step choices come from `BENCH.md`'s measurements and

@@ -180,7 +180,7 @@ highest-probability failure).
 | H1 | Store, producers, first real view | Done | `oled_hud/hud/store.py`, `producers.py`, `font.py`, `fonts/` (3 fonts + `scripts/build_fonts.py`, `fonts/*.bdf`), `views.py` (`SysView`), `tests/test_{font,store,producers,views}.py`, `oled_hud/demos/font_sampler.py`, `oled_hud/hud/__init__.py` (panel geometry) |
 | H3 | Lifecycle: singleton, reset, systemd | Code done, systemd unit not installed | `oled_hud/hud/daemon.py`, `tests/test_daemon.py`, `systemd/oled-hud.service` |
 | — | `driver.py` blit coverage (session 10) | Done | `tests/test_driver.py` |
-| H2 | Views, scheduler, preemption, transitions | Code done, on-device numbers pending | `oled_hud/hud/scheduler.py`, `alerts.py`, `transition.py`, `views.py` (`View`, `ClockView`, `AlertView`), `font.py` (`upscale`), `daemon.py` (`run_loop`, new flags), `tests/test_{scheduler,alerts,transition}.py` |
+| H2 | Views, scheduler, preemption, transitions | Verified on-device; x4 Spleen legibility eyeball pending | `oled_hud/hud/scheduler.py`, `alerts.py`, `transition.py`, `views.py` (`View`, `ClockView`, `AlertView`), `font.py` (`upscale`), `daemon.py` (`run_loop`, new flags), `tests/test_{scheduler,alerts,transition}.py` |
 | H4 | Buttons and burn-in | Not started | |
 
 ### 2026-09-14 — session 6 (Phase H0)
@@ -664,9 +664,10 @@ code: a big-type clock, threshold alerts, and a horizontal slide.
   is a *different* clock zeroed at construction. Feeding the wrong one in
   would have made every reading look permanently fresh or permanently stale
   depending on which origin happened to be larger.
-- 73 new tests across `test_{font,views,transition,alerts,scheduler,daemon}.py`
-  (185 -> 258), house style throughout: plain asserts, module-level fakes,
-  a mutable-`t` `FakeClock`. `test_every_default_rule_names_a_key_a_producer_publishes`
+- 80 new tests across `test_{font,views,transition,alerts,scheduler,daemon}.py`
+  (252 -> 332 collected, verified on the Pi), house style throughout: plain
+  asserts, module-level fakes, a mutable-`t` `FakeClock`.
+  `test_every_default_rule_names_a_key_a_producer_publishes`
   cross-checks `default_rules()` against `producers.py`'s actual poll()
   source (regex over `inspect.getsource`, not a call to poll() itself, which
   needs real `/proc`/`/sys` files this doesn't have off a Pi) -- catches a
@@ -682,15 +683,38 @@ code: a big-type clock, threshold alerts, and a horizontal slide.
   nothing" headline becomes ~95% at that dwell. Real, deliberate, and
   recoverable exactly via `--transition none`, which is also the control for
   the live A/B still to run on the actual panel.
-- **Not yet done: on-device verification.** Windows has no I2C bus and the
-  five hardware-dependent test modules (`test_{daemon,driver,effects,pack,soak}.py`)
-  don't run here, so `run_loop()`/`build_views()`/`parse_args()` were smoke-
-  tested against stubbed `board`/`busio`/`digitalio`/`adafruit_ssd1305`/
-  `fcntl` modules (not committed) rather than real hardware. Still needed on
-  the Pi: the three-config push-count table above with real numbers, the
-  six H3 lifecycle checks re-run against the new loop (session 9's rule --
-  the frame body changed again), a forced-alert check, and an eyeball
-  verdict on x4 Spleen legibility.
+- **On-device verification, done.** Windows has no I2C bus, so
+  `run_loop()`/`build_views()`/`parse_args()` were first smoke-tested against
+  stubbed `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`fcntl` modules
+  (not committed), then verified for real: the branch was pushed straight to
+  the Pi's checkout over `ssh` (not through GitHub) and run there.
+  - Full suite: **332 passed** (up from 252 on `main`), including the five
+    hardware-dependent modules Windows can't run at all.
+  - Three-config push table, 30s/60fps runs against the real panel:
+
+    | config | renders | pushes | frames pushing / 1800 | pushed nothing |
+    |---|---|---|---|---|
+    | dwell 8s, slide 0.3s | 81 | 64 | 62 | 96.6% |
+    | dwell 30s, slide 0.3s | 19 | 16 | 12 | 99.3% |
+    | dwell 30s, `--transition none` | 19 | 13 | 12 | 99.3% |
+
+    All three ran with min slack 6.4-6.9ms of the 16.7ms budget, 0 late, 0
+    dropped. The `--transition none` row lands within noise of the original
+    H1 measurement (19 renders/21 pushes) -- H2 doesn't regress the static
+    case. The dwell-8s row beat the ~95.3% modeled estimate (96.6% actual);
+    the model was a conservative upper bound on cost, not a promise, so
+    this is the expected direction to be wrong in.
+  - Forced a `cpu.temp=99.0` alert through a stand-in hot producer (real
+    panel, real fonts, everything else untouched): the scheduler switched to
+    `AlertView` and reported it via `sched.alert`, confirmed against the
+    physical display.
+  - Re-ran all six H3 lifecycle checks against the new loop (session 9's
+    rule -- the frame body changed again): SIGTERM exits 0, immediate
+    relaunch succeeds, a concurrent second instance exits 1 with "already
+    running", `kill -9` leaves no stale lock, and the two setup-failure
+    tests in `test_daemon.py` (panel cleared, lock released) pass.
+  - **Not yet done:** an eyeball verdict on x4 Spleen legibility for
+    `ClockView` -- that one needs a human looking at the actual panel.
 
 ## Next up
 

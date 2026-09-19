@@ -1,14 +1,37 @@
 # oled
 
-SSD1305 OLED driver, animation engine, and a system-monitor HUD daemon
-for a Raspberry Pi.
+## Purpose
 
-## Hardware
+Drives a 128x32 SSD1305 OLED bonnet on a Raspberry Pi: a partial-blit
+driver, a no-PIL animation engine built on it, and a system-monitor HUD
+daemon built on top of that. See `BENCH.md`/`PROGRESS.md` for why avoiding
+full-frame pushes and PIL in the hot path mattered enough to build around.
 
-- Raspberry Pi 3 B+
-- SSD1305 128x32 OLED, I2C (SCL/SDA), reset on `board.D4`
+## Features
 
-## Setup
+- **Driver** — partial-blit `PartialSSD1305` on top of Adafruit's
+  `SSD1305_I2C`, pushing only the dirty page/column rectangle.
+- **Animation engine** — packed-tape scrolling, a fixed-timestep frame
+  clock, non-blocking command-register effects (fade/blink/flash/invert),
+  and a soak-test harness for long-run leak/latency verdicts.
+- **HUD daemon** — diffing compositor (pushes only what changed), a
+  TTL'd latest-value store fed by system producers (CPU/mem/disk/load/
+  uptime/IP), vendored bitmap fonts, and a lifecycle-managed entrypoint
+  (singleton lock, clean shutdown) with a `systemd` unit template.
+- **Demos** — scrolling ticker, bouncing-sprite/wireframe animations, a
+  live FFT audio spectrum visualizer, an ITU-R BS.1770-4 LUFS loudness
+  meter, and two live data tickers (Prometheus/node_exporter telemetry,
+  Coinbase BTC-USD price/holding).
+- **Tests** — a fast, hardware-free `pytest` suite covering the packer,
+  clock/effects/soak logic, driver GDDRAM math, and every HUD daemon
+  module.
+
+## How to Use
+
+**Hardware:** Raspberry Pi 3 B+, SSD1305 128x32 OLED, I2C (SCL/SDA),
+reset on `board.D4`.
+
+### Setup
 
 Dependencies live in the `.env` virtualenv (not `python-dotenv` — an actual
 venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
@@ -279,32 +302,24 @@ either an Ed25519 or an EC secret.
   `telemetry_display.py`. Auth via the official `coinbase-advanced-py`
   SDK's `RESTClient`, credentials from `.env.secrets` (see Setup above).
 
-## Status
+## Open Items
 
-All five phases of the animation-engine plan are implemented: 0 (timing
-benchmarks), 1 (driver probe, partial), 2 (packed-tape core), 3
-(partial-blit driver) and 4 (effects & scheduling) — and every acceptance
-criterion from the handoff is checked off. See `PROGRESS.md` for the
-phase/session tracker and `NOTES.md` for the Phase 1 driver notes.
+- **H2 (view scheduler) and H4 (buttons, burn-in)** — not started. H0
+  (compositor), H1 (store/producers/fonts/first view), and H3 (daemon
+  lifecycle) are done and soak-tested.
+- **`systemd/oled-hud.service`** — written but not installed; needs a
+  one-time `sudo` on the target Pi.
+- **`hw_scroll_spike.py`** (hardware scroll register probe, noted in
+  `NOTES.md`) — never run. Non-blocking: the tape approach avoids hardware
+  scroll entirely, and nothing depends on it.
 
-The 30-minute production-config soak (60fps, 1px step) ran clean:
-108,000 frames, 0 late, 0 dropped, 0 errors, RSS flat after an early
-warm-up staircase, blit p95 unchanged start-to-end. `py-spy` confirms the
-frame loop never touches PIL/font code, not just by inspection — see
-`PROGRESS.md`'s session 5 for the full numbers and the
-`scripts/analyze_soak.py` methodology (including a real bug it caught in
-its own first version: a naive "monotonic" leak check that couldn't tell
-a plateaued warm-up staircase from an actual climb).
+Everything else is implemented and validated: all five animation-engine
+phases (0-4) are done and every acceptance criterion from the handoff is
+checked off — a 30-minute production-config soak (60fps, 1px step) ran
+108,000 frames with 0 late, 0 dropped, 0 errors, RSS flat, blit p95
+unchanged start-to-end (`PROGRESS.md` session 5). The HUD daemon's
+30-second/60fps run did 1800 frames with 0 late/dropped, re-rendering 19
+times and pushing 21 times — over 99% of frames pushed nothing at all.
 
-On the HUD side, phases H0 (compositor), H1 (store, producers, fonts, first
-real view) and H3 (daemon lifecycle) are implemented. The daemon now shows
-live local-system telemetry through vendored bitmap fonts with no PIL in the
-frame path: a 30-second run at 60fps did 1800 frames with 0 late and 0
-dropped, re-rendering 19 times and pushing 21 times — over 99% of frames
-pushed nothing at all. H2 (view scheduler) and H4 (buttons, burn-in) are
-next; the `systemd` unit is still uninstalled and needs a one-time `sudo`.
-
-FPS and scroll-step choices come from `BENCH.md`'s measurements and
-`FrameClock`'s reported slack, not from assumptions. Still open: the
-Phase 1 `hw_scroll_spike.py` probe noted in `NOTES.md` — never blocking,
-since the tape approach avoids hardware scroll entirely.
+See `PROGRESS.md` for the full phase/session tracker and `NOTES.md` for
+the Phase 1 driver notes.

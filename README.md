@@ -22,31 +22,40 @@ Nothing here is installed as a package — the repo is run in place. Run
 scripts through the venv:
 
 ```
+# smoke test / benchmarks / tests
 .env/bin/python3 test.py
 .env/bin/python3 bench.py
 .env/bin/python3 walk.py
+.env/bin/python3 -m pytest tests/
+
+# animation-engine demos
 .env/bin/python3 -m oled_hud.demos.tape_scroll
 .env/bin/python3 -m oled_hud.demos.ticker --fps 30 --seconds 60
 .env/bin/python3 -m oled_hud.demos.ticker --fps 60 --step 1 --seconds 1800 \
     --soak-log runs/soak.jsonl
 .env/bin/python3 scripts/analyze_soak.py runs/soak.jsonl --exit-code $?
-.env/bin/python3 -m pytest tests/
 .env/bin/python3 -m oled_hud.demos.hud_animate --seconds 20
+.env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
+.env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
+.env/bin/python3 scripts/build_fonts.py
+
+# audio (needs sounddevice + a capture device, see below)
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --list
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --bars 32
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --style mirror
 .env/bin/python3 -m oled_hud.demos.lufs_meter --device 1 --floor -90 --ceil -50
-.env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
+
+# telemetry / market data
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
 .env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
 .env/bin/python3 -m oled_hud.demos.coinbase_ticker --poll-interval 15
-.env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
+
+# HUD daemon (the main thing here)
 .env/bin/python3 -m oled_hud.hud.daemon
 .env/bin/python3 -m oled_hud.hud.daemon --font fixed4x6 --seconds 20 --stats
-.env/bin/python3 scripts/build_fonts.py
 ```
 
-The daemon is the main thing here. On the default font it shows:
+On the default font, the daemon shows:
 
 ```
 +-------------------------+
@@ -88,6 +97,8 @@ either an Ed25519 or an EC secret.
 
 ## Layout
 
+### Core driver & engine
+
 - `test.py` — smoke test: draws two lines of text and pushes them to the
   display.
 - `oled_hud/driver.py` — `PartialSSD1305`, extends Adafruit's `SSD1305_I2C`
@@ -115,6 +126,9 @@ either an Ed25519 or an EC secret.
   `all_on`, plus non-blocking `Fade`/`Blink`/`Flash` and an `EffectQueue`.
   Driven by elapsed time rather than frame count, so they keep wall-clock
   speed regardless of fps or dropped frames.
+
+### Animation-engine demos
+
 - `oled_hud/demos/tape_scroll.py` — demo: scrolls a text ticker on pages 2-3
   via `Tape.frame()` -> `blit()`, paced by `time.sleep()`.
 - `oled_hud/demos/ticker.py` — the same ticker on `FrameClock` with an
@@ -131,6 +145,9 @@ either an Ed25519 or an EC secret.
   verdict: RSS slope (overall and tail-only, to tell a leak from a
   converged warm-up staircase), blit p95 drift between the first and last
   third of the run, error counts, and the worst-case slack floor.
+
+### Tests
+
 - `tests/` — `pytest` suite for `pack.py`/`tape.py` (checked byte-for-byte
   against `tests/reference.py`'s hardware-validated packer), for
   `clock.py`/`effects.py` (driven by a fake clock and a fake display), for
@@ -149,6 +166,9 @@ either an Ed25519 or an EC secret.
   against captured `/proc` fixtures, and `test_views.py` asserts in a clean
   subprocess that the render path never imports PIL — all run fast and
   without hardware.
+
+### HUD daemon
+
 - `oled_hud/hud/compositor.py` — HUD daemon Phase H0: `Compositor` diffs a
   packed framebuffer against what's known to be on the panel and pushes
   only the minimum, choosing per dirty-page run between one wide push and
@@ -166,9 +186,10 @@ either an Ed25519 or an EC secret.
   (measured: 19 renders and 21 pushes over 1800 frames at 60fps). `--font`
   picks the bitmap font and with it the line/column budget, `--fps` the frame
   loop rate, `--lock-path` where the singleton `flock` lives, and `--stats`
-  prints the render/push counts on exit. No PIL anywhere in the loop. Entrypoint for `systemd/oled-hud.service`; see
-  `PROGRESS.md`'s "HUD daemon" section for what's verified vs. what still
-  needs the unit installed.
+  prints the render/push counts on exit. No PIL anywhere in the loop.
+  Entrypoint for `systemd/oled-hud.service`; see `PROGRESS.md`'s "HUD
+  daemon" section for what's verified vs. what still needs the unit
+  installed.
 - `systemd/oled-hud.service` — user unit template for the daemon above.
 - `oled_hud/hud/__init__.py` — the panel's geometry (`WIDTH`, `HEIGHT`, and
   `PAGES` derived from it), in one place because `views.py` thinks in pixels
@@ -214,6 +235,9 @@ either an Ed25519 or an EC secret.
   (pages 0-1) and a scrolling random-walk sparkline (pages 2-3) driven
   straight through the Compositor, no PIL, no Store/producers — exercises
   `plan_run()` against real per-frame motion rather than the static case.
+
+### Audio demos
+
 - `oled_hud/demos/audio_visualizer.py` — live FFT spectrum analyzer off a
   USB mic via `sounddevice`: 32 log-spaced bars, zero-padded FFT (finer
   bin spacing at the low end without added latency), a per-bar dB tilt to
@@ -231,11 +255,17 @@ either an Ed25519 or an EC secret.
   loudness, rendered as a scrolling LUFS history. `--floor`/`--ceil` tune
   the display range for a given input chain's actual level. Validated
   against BS.1770's own calibration point — see `PROGRESS.md` session 8.
+
+### Other demos
+
 - `oled_hud/demos/wireframe.py` — a rotating 3D wireframe cube or pyramid
   (`--shape`), no PIL: per-frame rotation matrix, perspective projection
   scaled to the panel's 32px height, edges rasterized as lines via
   `np.linspace`. `pyramid` is the default — fewer edges alias less at this
   resolution than the cube, per live feedback in `PROGRESS.md` session 8.
+
+### Telemetry & market data
+
 - `scripts/prom_pull.py` — standalone terminal script (stdlib `urllib`
   only) pulling CPU temp/load/usage from a remote Prometheus/node_exporter
   and printing them; `--interval` loops. No OLED involved — just the raw

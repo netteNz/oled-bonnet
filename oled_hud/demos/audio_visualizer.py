@@ -14,6 +14,7 @@ Run with:
     .env/bin/python3 -m oled_hud.demos.audio_visualizer --seconds 30 --bars 32
     .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1
     .env/bin/python3 -m oled_hud.demos.audio_visualizer --style mirror
+    .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --floor -80
 """
 
 import argparse
@@ -43,7 +44,10 @@ FFT_SIZE = 8192  # zero-padded rfft size: interpolates the spectrum to a finer
 # WINDOW's native spacing the lowest log-spaced bars are narrower than one
 # bin and always read zero; this is what fixes that instead of widening FMIN.
 FMIN, FMAX = 40.0, 16000.0
-DB_FLOOR, DB_CEIL = -60.0, 0.0
+DB_FLOOR, DB_CEIL = -60.0, 0.0  # default display range mapped to bar height;
+# override with --floor/--ceil for a weak input chain (e.g. a headphone-out
+# cable into a mic-in, which never reaches line level) -- see lufs_meter.py,
+# which needed the same knob for the same reason.
 ATTACK, RELEASE = 0.6, 0.15  # envelope follow rate per frame, tuned by eye
 TILT_DB_PER_OCTAVE = 4.5  # boosts bars by frequency to counter real audio's
 # natural high-end roll-off (pink-noise-ish spectral tilt) -- without this the
@@ -156,6 +160,8 @@ def parse_args(argv=None):
     )
     parser.add_argument("--device", default=None, help="sounddevice index or name substring")
     parser.add_argument("--list", action="store_true", help="list audio devices and exit")
+    parser.add_argument("--floor", type=float, default=DB_FLOOR, help="dB mapped to an empty bar")
+    parser.add_argument("--ceil", type=float, default=DB_CEIL, help="dB mapped to a full-height bar")
     return parser.parse_args(argv)
 
 
@@ -211,7 +217,7 @@ def main(argv=None):
                     spec = np.abs(np.fft.rfft(padded))
                     bars = bin_bars(spec, freqs, edges)
                     db = 20 * np.log10(bars + 1e-6) + tilt_db
-                    target = np.clip((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR), 0.0, 1.0) * scale
+                    target = np.clip((db - args.floor) / (args.ceil - args.floor), 0.0, 1.0) * scale
                     rate = np.where(target > env, ATTACK, RELEASE)
                     env += (target - env) * rate
 

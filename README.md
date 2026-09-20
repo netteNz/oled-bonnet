@@ -16,8 +16,10 @@ full-frame pushes and PIL in the hot path mattered enough to build around.
   and a soak-test harness for long-run leak/latency verdicts.
 - **HUD daemon** — diffing compositor (pushes only what changed), a
   TTL'd latest-value store fed by system producers (CPU/mem/disk/load/
-  uptime/IP), vendored bitmap fonts, and a lifecycle-managed entrypoint
-  (singleton lock, clean shutdown) with a `systemd` unit template.
+  uptime/IP), vendored bitmap fonts, a scheduler rotating over several
+  views with a horizontal slide and threshold-alert preemption, and a
+  lifecycle-managed entrypoint (singleton lock, clean shutdown) with a
+  `systemd` unit template.
 - **Demos** — scrolling ticker, bouncing-sprite/wireframe animations, a
   live FFT audio spectrum visualizer, an ITU-R BS.1770-4 LUFS loudness
   meter, and two live data tickers (Prometheus/node_exporter telemetry,
@@ -235,16 +237,17 @@ either an Ed25519 or an EC secret.
   nothing changes.
 - `oled_hud/hud/daemon.py` — HUD daemon entrypoint. Phase H3 (lifecycle):
   singleton via a non-blocking `flock`, hardware reset + `force_full()` on
-  startup, clean `SIGTERM` shutdown. Phase H1 (content): drives a `Store`, a
-  `ProducerThread` and a `SysView`, re-rendering only when `store.version`
-  changes so almost every frame stays in the Compositor's push-nothing path
-  (measured: 19 renders and 21 pushes over 1800 frames at 60fps). `--font`
-  picks the bitmap font and with it the line/column budget, `--fps` the frame
-  loop rate, `--lock-path` where the singleton `flock` lives, and `--stats`
-  prints the render/push counts on exit. No PIL anywhere in the loop.
-  Entrypoint for `systemd/oled-hud.service`; see `PROGRESS.md`'s "HUD
-  daemon" section for what's verified vs. what still needs the unit
-  installed.
+  startup, clean `SIGTERM` shutdown. Phase H2 (content): drives a `Store`, a
+  `ProducerThread` and a `Scheduler` over several views (`run_loop()`, pulled
+  out of `main()` so it's drivable against a fake driver with no hardware).
+  `--views sys,clock` picks the rotation order, `--dwell` how long each view
+  holds, `--transition {slide,none}`/`--transition-s` the switch between
+  them, `--no-alerts` disables threshold preemption. `--font` picks the
+  bitmap font and with it the line/column budget, `--fps` the frame loop
+  rate, `--lock-path` where the singleton `flock` lives, and `--stats` prints
+  the render/push counts on exit. No PIL anywhere in the loop. Entrypoint for
+  `systemd/oled-hud.service`; see `PROGRESS.md`'s "HUD daemon" section for
+  what's verified vs. what still needs the unit installed.
 - `systemd/oled-hud.service` — user unit template for the daemon above.
 - `oled_hud/hud/__init__.py` — the panel's geometry (`WIDTH`, `HEIGHT`, and
   `PAGES` derived from it), in one place because `views.py` thinks in pixels
@@ -269,20 +272,50 @@ either an Ed25519 or an EC secret.
   `load("tomthumb")` or `load("fixed4x6")` (both 4x6, 32x5). Spleen is the
   default: see `PROGRESS.md` session 9 for why the 4x6 fonts lost and why
   the answer to wanting more on screen turned out to be the layout, not a
-  smaller face.
+  smaller face. `upscale()` (Phase H2) integer-repeats a rendered bitmap's
+  pixels for large type — `ClockView`'s big digits — without vendoring a
+  second, bigger font.
 - `scripts/build_fonts.py` + `fonts/` — offline BDF-to-module builder and
   the vendored BDF sources it reads. Run by hand, never imported at runtime;
   deterministic, so a rebuild leaves the generated modules byte-identical.
   See `fonts/NOTICE.md` for provenance and licensing.
-- `oled_hud/hud/views.py` — HUD daemon Phase H1: `SysView` turns a `Store`
-  snapshot into pixels and nothing else — no timer, no polling, no panel, so
-  H2's scheduler can decide when it's drawn without the view having an
-  opinion. `row()` packs several fields per line (first flush left, last
-  flush right, middles evenly spaced), which is what lets the readable
-  4-line font carry the same content as a 5-line one instead of leaving a
-  dozen dead columns in the middle of every row. Layout adapts to the font's
-  budget; a fifth line, when the font affords one, gets the 5- and
-  15-minute load averages.
+- `oled_hud/hud/views.py` — `View` base (Phase H2): `name`, `refresh`
+  (seconds between forced re-renders for a view whose pixels depend on wall
+  time rather than any `Reading`) and a shared `render_into()`. Every view
+  turns a `Store` snapshot into pixels and nothing else — no timer, no
+  polling, no panel of its own, so the H2 scheduler can decide when it's
+  drawn without the view having an opinion. `SysView` (Phase H1): `row()`
+  packs several fields per line (first flush left, last flush right, middles
+  evenly spaced), which is what lets the readable 4-line font carry the same
+  content as a 5-line one instead of leaving a dozen dead columns in the
+  middle of every row; a fifth line, when the font affords one, gets the 5-
+  and 15-minute load averages. `ClockView` (Phase H2): big type via
+  `font.upscale()` rather than a second vendored font — see
+  `oled_hud/hud/font.py` below — reading injected wall time (`time.time`),
+  not the monotonic clock everything else in this package is built on.
+  `AlertView` (Phase H2): the rule and value an `Alerts` evaluation is
+  currently firing, set via `show()` rather than through `render()`'s
+  signature so it still satisfies the plain `View` contract.
+- `oled_hud/hud/scheduler.py` — Phase H2: `Scheduler.frame()` decides,
+  every frame, whether a redraw is owed — a `store.version` change (the H1
+  case), a view's own `refresh` cadence, a dwell timer expiring (rotation)
+  or a threshold alert appearing/clearing (preemption) — and is what the
+  daemon's frame loop calls instead of the old `version != seen` check.
+  Alert lookups read individual store keys with `store.get()`; a full
+  `store.snapshot()` only happens on a frame that actually renders.
+- `oled_hud/hud/alerts.py` — Phase H2: `Rule`/`Alerts` evaluate threshold
+  conditions (with hysteresis and a `for_s` hold timer) against a `Store`
+  snapshot on the render thread — deliberately not a `Producer`, since a
+  producer's poll-and-forget shape has nowhere to keep that state and
+  evaluating through the store would recreate the render-gate problem H2
+  exists to solve one layer down. A stale reading never fires, matching
+  `views.fmt()`'s freshness discipline.
+- `oled_hud/hud/transition.py` — Phase H2: a horizontal slide between two
+  packed `(PAGES, WIDTH)` framebuffers — pure column indexing (`pack_bits`
+  is page-major MVLSB, so sliding sideways needs no unpacking), no PIL,
+  time-driven like `effects.Effect`. `Slide.retarget()` swaps the incoming
+  frame mid-transition without restarting progress, so a producer poll that
+  lands mid-slide doesn't ship a frame that's stale by the slide's duration.
 - `oled_hud/demos/font_sampler.py` — puts any of the three vendored fonts'
   printable ASCII range (or `--text`) on the panel, so "25 readable columns
   or 32 cramped ones" is judged by eye rather than from the numbers.
@@ -356,9 +389,11 @@ either an Ed25519 or an EC secret.
 
 ## Open Items
 
-- **H2 (view scheduler) and H4 (buttons, burn-in)** — not started. H0
-  (compositor), H1 (store/producers/fonts/first view), and H3 (daemon
-  lifecycle) are done and soak-tested.
+- **H4 (buttons, burn-in)** — not started. H0 (compositor), H1
+  (store/producers/fonts/first view), H2 (views, scheduler, preemption,
+  transitions) and H3 (daemon lifecycle) are done and soak-tested. H2 has
+  one loose end: an eyeball verdict on x4 Spleen legibility for `ClockView`,
+  which needs a human looking at the actual panel.
 - **`systemd/oled-hud.service`** — written but not installed; needs a
   one-time `sudo` on the target Pi.
 - **`hw_scroll_spike.py`** (hardware scroll register probe, noted in
@@ -369,9 +404,21 @@ Everything else is implemented and validated: all five animation-engine
 phases (0-4) are done and every acceptance criterion from the handoff is
 checked off — a 30-minute production-config soak (60fps, 1px step) ran
 108,000 frames with 0 late, 0 dropped, 0 errors, RSS flat, blit p95
-unchanged start-to-end (`PROGRESS.md` session 5). The HUD daemon's
-30-second/60fps run did 1800 frames with 0 late/dropped, re-rendering 19
-times and pushing 21 times — over 99% of frames pushed nothing at all.
+unchanged start-to-end (`PROGRESS.md` session 5).
+
+On the HUD side, the daemon shows live local-system telemetry and a big-type
+clock, rotating between them with a horizontal slide, and preempts the
+rotation for threshold alerts (CPU temp, disk, memory, load), all through
+vendored bitmap fonts with no PIL in the frame path. The H1 baseline (one
+static view, no transitions) measured 19 renders and 21 pushes over 1800
+frames at 60fps — over 99% of frames pushed nothing. Rotating between two
+views on an 8s dwell with a 0.3s slide spends some of that deliberately:
+verified on the real panel at 30s/60fps, that config did 81 renders and 64
+pushes over 1800 frames (62 pushing, 96.6% pushed nothing); dwell 30s or
+`--transition none` lands within noise of the H1 number. All three ran with
+0 late, 0 dropped, and 6.4-6.9ms of the 16.7ms budget to spare. See
+`PROGRESS.md` session 11 for the full table, the forced-alert check and the
+re-run H3 lifecycle checks.
 
 See `PROGRESS.md` for the full phase/session tracker and `NOTES.md` for
 the Phase 1 driver notes.

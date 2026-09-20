@@ -1,9 +1,12 @@
-"""HUD views (Phase H1) -- so far exactly one, the local-system view.
+"""HUD views (Phase H1 local-system view; Phase H2 the rest).
 
 A view turns a `Store` snapshot into pixels and nothing else: it owns no
-timer, no polling and no panel. That keeps H2's scheduler free to decide
+timer, no polling and no panel. That keeps the H2 scheduler free to decide
 *when* a view is drawn without the view having an opinion, and keeps this
-module testable against a dict with no hardware anywhere.
+module testable against a dict with no hardware anywhere. `View.refresh` is
+the one exception -- a hook for a view whose pixels depend on wall-clock time
+rather than any `Reading`, so it still has no polling and no panel, just a
+cadence the scheduler honors alongside `store.version`.
 
 Layout is computed from the font rather than hardcoded, because the two
 vendored fonts give different budgets -- Spleen 5x8 fits 4 lines of 25
@@ -18,17 +21,20 @@ through the layout is how a HUD ends up displaying one field's last-known
 number forever.
 """
 
+import time
 from collections.abc import Callable
 
 import numpy as np
 
 from oled_hud.hud import HEIGHT, WIDTH
-from oled_hud.hud.font import Font
+from oled_hud.hud.font import Font, upscale
 from oled_hud.hud.producers import format_uptime
 from oled_hud.hud.store import Snapshot
 from oled_hud.pack import pack_bits
 
 MISSING = "--"
+
+_WEEKDAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 
 
 def fmt(snap: Snapshot, key: str, spec: str = "{:.1f}", *, now: float,
@@ -82,11 +88,47 @@ def row(fields: list[str], cols: int) -> str:
     return out[:cols]
 
 
-class SysView:
+class View:
+    """What the H2 scheduler needs of anything it can put on the panel.
+
+    A base class rather than a `Protocol` (contrast `compositor.Driver`,
+    which is a Protocol on purpose): there, the tests deliberately pass a
+    recorder instead of real hardware and there is no shared code to give
+    them. Here every view's `render_into()` is the same three lines --
+    zero the canvas, call the subclass's `render()`, pack it -- so making
+    that concrete and inherited is a real saving, not an accident of taste.
+    """
+
+    #: Identifies this view to the scheduler, which selects among several
+    #: by name.
+    name = ""
+
+    #: Seconds between forced re-renders even if `store.version` hasn't
+    #: changed. 0 means "only a data change or a scheduler event should
+    #: redraw this view" -- the H1 behavior, kept as the default so a plain
+    #: `SysView` costs the scheduler nothing extra. A view whose pixels
+    #: depend on wall-clock time rather than on any `Reading` (a clock)
+    #: sets this instead of pretending to be a producer.
+    refresh: float = 0.0
+
+    def render(self, canvas: np.ndarray, snap: Snapshot, now: float) -> None:
+        raise NotImplementedError
+
+    def render_into(self, fb: np.ndarray, snap: Snapshot, now: float) -> None:
+        """Render and pack straight into a Compositor framebuffer.
+
+        The bool canvas is the intermediate because content lands at
+        arbitrary pixel offsets, not page boundaries; `pack_bits` converts it
+        to the page-major layout `Compositor.fb` and `blit()` share.
+        """
+        canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+        self.render(canvas, snap, now)
+        fb[...] = pack_bits(canvas)
+
+
+class SysView(View):
     """Host, CPU, memory, disk and network from the local-system producers."""
 
-    #: Identifies this view to H2's scheduler, which will select among
-    #: several by name. Nothing reads it yet.
     name = "sys"
 
     def __init__(self, font: Font):
@@ -165,13 +207,104 @@ class SysView:
         for i, fields in enumerate(self.select(self.rows(snap, now))):
             self.font.draw(canvas, row(fields, self.cols), 0, self.y0 + i * self.font.height)
 
-    def render_into(self, fb: np.ndarray, snap: Snapshot, now: float) -> None:
-        """Render and pack straight into a Compositor framebuffer.
 
-        The bool canvas is the intermediate because text rows land at
-        arbitrary pixel offsets, not page boundaries; `pack_bits` converts it
-        to the page-major layout `Compositor.fb` and `blit()` share.
-        """
-        canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
-        self.render(canvas, snap, now)
-        fb[...] = pack_bits(canvas)
+class ClockView(View):
+    """Big-type wall clock, for a HUD scheduler rotation.
+
+    Wall time, not the monotonic clock everything else in this package is
+    built on: `Store`, `ProducerThread` and `FrameClock` all use
+    `time.monotonic`/`perf_counter` because a `Reading`'s age must never jump
+    backwards under an NTP step. A clock has the opposite job -- show what a
+    clock on the desk would show -- so it reads `wall`/`localtime` directly
+    rather than going through a `Reading`, and ignores the `now` argument
+    `render()` is handed (that `now` is `store.now()`, the monotonic one).
+    Both hooks are injected so a test can pin the rendered string without
+    depending on the test machine's timezone (pass `localtime=time.gmtime`)
+    or the wall clock actually moving.
+
+    `refresh = 1.0` asks the scheduler to redraw this view once a second, but
+    "HH:MM" only changes once a minute -- so 59 of every 60 renders produce a
+    canvas byte-identical to the one already on screen, and the Compositor's
+    diff turns those into zero pushes. That's why the gutter next to the big
+    digits carries the day of week rather than seconds: a seconds readout
+    would make every one of those 60 renders genuinely different and turn a
+    near-free view into one that pushes every second forever.
+    """
+
+    name = "clock"
+    refresh = 1.0
+
+    def __init__(self, font: Font, *, scale: int = 4,
+                 wall: Callable[[], float] = time.time,
+                 localtime: Callable[[float], time.struct_time] = time.localtime):
+        self.font = font
+        self.scale = scale
+        self.wall = wall
+        self.localtime = localtime
+        self.big_h = font.height * scale
+        self.y0 = (HEIGHT - self.big_h) // 2
+
+    def render(self, canvas: np.ndarray, snap: Snapshot, now: float) -> None:
+        t = self.localtime(self.wall())
+        text = f"{t.tm_hour:02d}:{t.tm_min:02d}"
+        big = upscale(self.font.render(text), self.scale)
+        h, w = big.shape
+        x0 = (WIDTH - w) // 2
+        canvas[self.y0 : self.y0 + h, x0 : x0 + w] |= big
+
+        # Whatever width is left of the centered clock carries one small
+        # status field -- the day of week, which (like the hour and minute)
+        # is stable for the whole minute, keeping the byte-identical-frame
+        # property above intact.
+        gutter = WIDTH - (x0 + w)
+        if gutter >= self.font.advance * len(_WEEKDAYS[0]):
+            day = _WEEKDAYS[t.tm_wday]
+            gx = x0 + w + max(0, (gutter - self.font.measure(day)) // 2)
+            self.font.draw(canvas, day, gx, self.y0)
+
+
+class AlertView(View):
+    """Firing-alert banner, shown by the scheduler while a threshold holds.
+
+    Takes the alert to display through `show()` rather than through
+    `render()`'s signature, so it still satisfies the plain `View` contract
+    everything else in the rotation is treated through -- the scheduler is
+    the only thing in H2 that knows `alerts.py` exists; this view just draws
+    whatever it's handed and shows nothing at all if it's handed nothing.
+
+    The rule's own value goes through `fmt()`, exactly like `SysView`'s
+    rows, so a reading that goes stale *while its own alert is on screen*
+    still degrades to "--" instead of the last number that triggered it --
+    the alert's existence should never make a number look more current than
+    the freshness discipline everywhere else in this module allows.
+    """
+
+    name = "alert"
+    refresh = 1.0  # keeps the elapsed-time readout ticking once a second
+
+    def __init__(self, font: Font, label_font: Font | None = None):
+        self.font = font
+        self.label_font = label_font or font
+        self._alert = None
+
+    def show(self, alert) -> None:
+        """Set the alert to display. `alert=None` blanks the view."""
+        self._alert = alert
+
+    def render(self, canvas: np.ndarray, snap: Snapshot, now: float) -> None:
+        if self._alert is None:
+            return
+        rule = self._alert.rule
+
+        label = upscale(self.label_font.render(rule.label), 2)
+        lh, lw = label.shape
+        lx = max(0, (WIDTH - lw) // 2)
+        visible = min(lw, WIDTH - lx)
+        canvas[:lh, lx : lx + visible] |= label[:, :visible]
+
+        value = fmt(snap, rule.key, rule.spec, now=now)
+        age = format_uptime(max(0.0, now - self._alert.since))
+        line = f"{rule.key} {value}  {age}"
+        y = lh + 1
+        if y + self.font.height <= HEIGHT:
+            self.font.draw(canvas, line, 2, y)

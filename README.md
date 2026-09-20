@@ -66,12 +66,17 @@ scripts through the venv:
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --list
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --bars 32
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --style mirror
+.env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --floor -80
 .env/bin/python3 -m oled_hud.demos.lufs_meter --device 1 --floor -90 --ceil -50
 
 # telemetry / market data
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
 .env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
 .env/bin/python3 -m oled_hud.demos.coinbase_ticker --poll-interval 15
+.env/bin/python3 -m oled_hud.demos.btc_sparkline --window 24h
+.env/bin/python3 -m oled_hud.demos.btc_sparkline --window live --live-span 300
+.env/bin/python3 -m oled_hud.demos.idle_clock
+.env/bin/python3 -m oled_hud.demos.idle_clock --12h
 
 # HUD daemon (the main thing here)
 .env/bin/python3 -m oled_hud.hud.daemon
@@ -102,15 +107,42 @@ needs `sudo`; provides the headers `sounddevice` builds against) then
 can't hear its own headphone output acoustically — if you want the
 visualizer/meter reacting to something playing over headphones, route it
 with a physical cable (headphone-out to mic-in) rather than relying on the
-mic to pick it up from the air.
+mic to pick it up from the air. Both demos take `--floor`/`--ceil` (dB) to
+tune the display range for a weak input chain — a phone's headphone-out
+through a USB-C-to-3.5mm cable into a mic-in never reaches line level, so
+the default range can sit close to the floor. `audio_visualizer.py`'s
+default range worked fine as measured against that exact chain (rasp3,
+session 12): the actual per-band FFT magnitude, with the frequency tilt
+applied, swung from about -10 to +23dB, comfortably inside the default
+-60/0 range, even though the raw time-domain level was only around -59dBFS.
+
+**Capture hardware, verified on rasp3 (session 12):** the onboard 3.5mm jack
+is output-only (`bcm2835 Headphones` reports `0 in, 8 out` — there's no way
+to make it a mic input). A USB audio adapter/headset (the setup above) is
+the default. Two no-USB alternatives have their *prerequisites* confirmed
+present but are **not tested end-to-end** — no BT audio sink/source has
+actually been verified through `sounddevice` yet, so treat both as
+unverified until one is: a Bluetooth headset/mic, since the Pi 3B+'s
+onboard radio (`hci0`, `bluetoothctl`) and PipeWire's Bluetooth backend
+(`libspa-0.2-bluetooth`) are both already present — pairing one and
+selecting its HSP/HFP (mic) profile is *expected* to expose it as a
+`sounddevice` capture device with no code changes, but PortAudio's ALSA
+backend may need pointing at a `pulse`/`pipewire` virtual device rather
+than a raw `hw:X,Y` card the way the HyperX shows up, and that path hasn't
+been exercised; and an I2S MEMS mic (INMP441/SPH0645-class, a few dollars),
+since this rig only uses SCL/SDA/`board.D4` for the OLED, leaving GPIO18-21
+free, and `/boot/firmware/config.txt` already has `#dtparam=i2s=on`
+present, just commented out — this one is unverified even further, no
+hardware has been connected.
 
 `scripts/prom_pull.py` and `oled_hud/demos/telemetry_display.py` need a
 reachable Prometheus/node_exporter (`--url`, default
 `http://192.168.50.249:9090` — the user's Pi 4). Both are stdlib-only
 (`urllib`), no extra dependency.
 
-`oled_hud/demos/coinbase_ticker.py` needs a Coinbase Developer Platform
-(CDP) API key and reads it from `.env.secrets` in the repo root — gitignored,
+`oled_hud/demos/coinbase_ticker.py` and `oled_hud/demos/btc_sparkline.py`
+need a Coinbase Developer Platform (CDP) API key and read it from
+`.env.secrets` in the repo root — gitignored,
 `chmod 600`, **not** named `.env` since that's the venv directory (see
 Setup above). Copy `.env.secrets.example` to `.env.secrets` and fill in your
 own `CDP_API_KEY` and `CDP_API_SECRET`; never commit the real file. Auth
@@ -302,6 +334,25 @@ either an Ed25519 or an EC secret.
   row per holding, same poll/frame-loop split as `telemetry_display.py`.
   Auth via the official `coinbase-advanced-py` SDK's `RESTClient`,
   credentials from `.env.secrets` (see Setup above).
+- `oled_hud/demos/btc_sparkline.py` — BTC-USD trend sparkline (left 78px)
+  next to a stacked span/price/change readout (right 48px), through the
+  Compositor. `--window` picks the span: `24h`, `1h` and `30m` are candle
+  windows refetched every `--refresh-interval`, while `live` is a sliding
+  window (default 15m, `--live-span`) seeded from candles so it's full from
+  the first frame, then carried forward by WS ticks placed on the x-axis by
+  timestamp — points drift left in real time and age off the end. The plot
+  auto-scales to the window's own min/max, floored at `MIN_RANGE_FRACTION`
+  of the price so a quiet stretch doesn't get amplified into a fake crash.
+  Same credentials as `coinbase_ticker.py`.
+- `oled_hud/demos/idle_clock.py` — screensaver-style idle display: big
+  seven-segment-style digits (hand-drawn rectangles, no PIL) with a
+  blinking colon, plus a weekday/date line in the vendored Spleen font.
+  `--12h` switches to a 12-hour clock with an AM/PM corner label. Redraws
+  only on a minute boundary or a colon blink, same change-gated pattern as
+  `coinbase_ticker.py`. The whole composition drifts a few pixels along a
+  slow ~37-minute circular path so an idle screen doesn't park the same
+  glyph shapes on the same OLED cells for hours — a stopgap for burn-in
+  ahead of H4, which is still not started.
 
 ## Open Items
 

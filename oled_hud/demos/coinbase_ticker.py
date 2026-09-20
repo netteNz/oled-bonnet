@@ -141,10 +141,35 @@ def fetch_balance(client: RESTClient, currency: str) -> float:
     return balance
 
 
+def _format_balance(balance: float) -> str:
+    """Fewer decimals as the integer part grows, so a holding in the
+    hundreds+ doesn't push the dollar value off the panel at size 12."""
+    if balance >= 100:
+        return f"{balance:,.1f}"
+    if balance >= 10:
+        return f"{balance:.2f}"
+    if balance >= 1:
+        return f"{balance:.3f}"
+    return f"{balance:.4f}"
+
+
+def _format_value(value: float) -> str:
+    """Cents only below $1k -- past that the cents aren't the digits that
+    matter and every character is panel width you don't have."""
+    return f"${value:,.0f}" if value >= 1000 else f"${value:,.2f}"
+
+
 def render_into(comp: Compositor, prices: dict[str, float], balances: dict[str, float]) -> None:
     """All PIL/font work happens here, off the frame path -- called only
-    when any price or balance actually changed, not every frame."""
-    font = ImageFont.load_default()
+    when any price or balance actually changed, not every frame.
+
+    Size 12 is as large as the default font goes while still fitting the
+    widest holding + value pair side by side at 128px -- size 13 overflows
+    (measured at 135px). Dropping the "=" and right-aligning the dollar
+    value instead of running it inline buys back the width that size bump
+    costs, and reads like an actual ticker instead of a log line.
+    """
+    font = ImageFont.load_default(size=12)
     img = Image.new("1", (WIDTH, HEIGHT))
     draw = ImageDraw.Draw(img)
     row_h = HEIGHT // len(HOLDINGS)
@@ -153,8 +178,12 @@ def render_into(comp: Compositor, prices: dict[str, float], balances: dict[str, 
         balance = balances.get(holding["currency"], 0.0)
         if price is None:
             continue
-        text = f"{holding['symbol']} {balance:.4f} = ${balance * price:,.2f}"
-        draw.text((2, i * row_h + 2), text, fill=255, font=font)
+        y = i * row_h + 1
+        left = f"{holding['symbol']} {_format_balance(balance)}"
+        right = _format_value(balance * price)
+        draw.text((2, y), left, fill=255, font=font)
+        right_w = draw.textlength(right, font=font)
+        draw.text((WIDTH - 2 - right_w, y), right, fill=255, font=font)
     bits = pack_bits(np.asarray(img, dtype=np.uint8) > 0)
     comp.fb[...] = bits
 

@@ -1,14 +1,37 @@
 # oled
 
-SSD1305 OLED driver, animation engine, and a system-monitor HUD daemon
-for a Raspberry Pi.
+## Purpose
 
-## Hardware
+Drives a 128x32 SSD1305 OLED bonnet on a Raspberry Pi: a partial-blit
+driver, a no-PIL animation engine built on it, and a system-monitor HUD
+daemon built on top of that. See `BENCH.md`/`PROGRESS.md` for why avoiding
+full-frame pushes and PIL in the hot path mattered enough to build around.
 
-- Raspberry Pi 3 B+
-- SSD1305 128x32 OLED, I2C (SCL/SDA), reset on `board.D4`
+## Features
 
-## Setup
+- **Driver** — partial-blit `PartialSSD1305` on top of Adafruit's
+  `SSD1305_I2C`, pushing only the dirty page/column rectangle.
+- **Animation engine** — packed-tape scrolling, a fixed-timestep frame
+  clock, non-blocking command-register effects (fade/blink/flash/invert),
+  and a soak-test harness for long-run leak/latency verdicts.
+- **HUD daemon** — diffing compositor (pushes only what changed), a
+  TTL'd latest-value store fed by system producers (CPU/mem/disk/load/
+  uptime/IP), vendored bitmap fonts, and a lifecycle-managed entrypoint
+  (singleton lock, clean shutdown) with a `systemd` unit template.
+- **Demos** — scrolling ticker, bouncing-sprite/wireframe animations, a
+  live FFT audio spectrum visualizer, an ITU-R BS.1770-4 LUFS loudness
+  meter, and two live data tickers (Prometheus/node_exporter telemetry,
+  Coinbase BTC-USD price/holding).
+- **Tests** — a fast, hardware-free `pytest` suite covering the packer,
+  clock/effects/soak logic, driver GDDRAM math, and every HUD daemon
+  module.
+
+## How to Use
+
+**Hardware:** Raspberry Pi 3 B+, SSD1305 128x32 OLED, I2C (SCL/SDA),
+reset on `board.D4`.
+
+### Setup
 
 Dependencies live in the `.env` virtualenv (not `python-dotenv` — an actual
 venv with `board`/`busio`/`digitalio`/`adafruit_ssd1305`/`numpy`/`Pillow`/
@@ -22,22 +45,31 @@ Nothing here is installed as a package — the repo is run in place. Run
 scripts through the venv:
 
 ```
+# smoke test / benchmarks / tests
 .env/bin/python3 test.py
 .env/bin/python3 bench.py
 .env/bin/python3 walk.py
+.env/bin/python3 -m pytest tests/
+
+# animation-engine demos
 .env/bin/python3 -m oled_hud.demos.tape_scroll
 .env/bin/python3 -m oled_hud.demos.ticker --fps 30 --seconds 60
 .env/bin/python3 -m oled_hud.demos.ticker --fps 60 --step 1 --seconds 1800 \
     --soak-log runs/soak.jsonl
 .env/bin/python3 scripts/analyze_soak.py runs/soak.jsonl --exit-code $?
-.env/bin/python3 -m pytest tests/
 .env/bin/python3 -m oled_hud.demos.hud_animate --seconds 20
+.env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
+.env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
+.env/bin/python3 scripts/build_fonts.py
+
+# audio (needs sounddevice + a capture device, see below)
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --list
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --bars 32
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --style mirror
 .env/bin/python3 -m oled_hud.demos.audio_visualizer --device 1 --floor -80
 .env/bin/python3 -m oled_hud.demos.lufs_meter --device 1 --floor -90 --ceil -50
-.env/bin/python3 -m oled_hud.demos.wireframe --shape cube --seconds 20
+
+# telemetry / market data
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
 .env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
 .env/bin/python3 -m oled_hud.demos.coinbase_ticker --poll-interval 15
@@ -45,13 +77,13 @@ scripts through the venv:
 .env/bin/python3 -m oled_hud.demos.btc_sparkline --window live --live-span 300
 .env/bin/python3 -m oled_hud.demos.idle_clock
 .env/bin/python3 -m oled_hud.demos.idle_clock --12h
-.env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
+
+# HUD daemon (the main thing here)
 .env/bin/python3 -m oled_hud.hud.daemon
 .env/bin/python3 -m oled_hud.hud.daemon --font fixed4x6 --seconds 20 --stats
-.env/bin/python3 scripts/build_fonts.py
 ```
 
-The daemon is the main thing here. On the default font it shows:
+On the default font, the daemon shows:
 
 ```
 +-------------------------+
@@ -120,6 +152,8 @@ either an Ed25519 or an EC secret.
 
 ## Layout
 
+### Core driver & engine
+
 - `test.py` — smoke test: draws two lines of text and pushes them to the
   display.
 - `oled_hud/driver.py` — `PartialSSD1305`, extends Adafruit's `SSD1305_I2C`
@@ -147,6 +181,9 @@ either an Ed25519 or an EC secret.
   `all_on`, plus non-blocking `Fade`/`Blink`/`Flash` and an `EffectQueue`.
   Driven by elapsed time rather than frame count, so they keep wall-clock
   speed regardless of fps or dropped frames.
+
+### Animation-engine demos
+
 - `oled_hud/demos/tape_scroll.py` — demo: scrolls a text ticker on pages 2-3
   via `Tape.frame()` -> `blit()`, paced by `time.sleep()`.
 - `oled_hud/demos/ticker.py` — the same ticker on `FrameClock` with an
@@ -163,6 +200,9 @@ either an Ed25519 or an EC secret.
   verdict: RSS slope (overall and tail-only, to tell a leak from a
   converged warm-up staircase), blit p95 drift between the first and last
   third of the run, error counts, and the worst-case slack floor.
+
+### Tests
+
 - `tests/` — `pytest` suite for `pack.py`/`tape.py` (checked byte-for-byte
   against `tests/reference.py`'s hardware-validated packer), for
   `clock.py`/`effects.py` (driven by a fake clock and a fake display), for
@@ -181,6 +221,9 @@ either an Ed25519 or an EC secret.
   against captured `/proc` fixtures, and `test_views.py` asserts in a clean
   subprocess that the render path never imports PIL — all run fast and
   without hardware.
+
+### HUD daemon
+
 - `oled_hud/hud/compositor.py` — HUD daemon Phase H0: `Compositor` diffs a
   packed framebuffer against what's known to be on the panel and pushes
   only the minimum, choosing per dirty-page run between one wide push and
@@ -198,9 +241,10 @@ either an Ed25519 or an EC secret.
   (measured: 19 renders and 21 pushes over 1800 frames at 60fps). `--font`
   picks the bitmap font and with it the line/column budget, `--fps` the frame
   loop rate, `--lock-path` where the singleton `flock` lives, and `--stats`
-  prints the render/push counts on exit. No PIL anywhere in the loop. Entrypoint for `systemd/oled-hud.service`; see
-  `PROGRESS.md`'s "HUD daemon" section for what's verified vs. what still
-  needs the unit installed.
+  prints the render/push counts on exit. No PIL anywhere in the loop.
+  Entrypoint for `systemd/oled-hud.service`; see `PROGRESS.md`'s "HUD
+  daemon" section for what's verified vs. what still needs the unit
+  installed.
 - `systemd/oled-hud.service` — user unit template for the daemon above.
 - `oled_hud/hud/__init__.py` — the panel's geometry (`WIDTH`, `HEIGHT`, and
   `PAGES` derived from it), in one place because `views.py` thinks in pixels
@@ -246,6 +290,9 @@ either an Ed25519 or an EC secret.
   (pages 0-1) and a scrolling random-walk sparkline (pages 2-3) driven
   straight through the Compositor, no PIL, no Store/producers — exercises
   `plan_run()` against real per-frame motion rather than the static case.
+
+### Audio demos
+
 - `oled_hud/demos/audio_visualizer.py` — live FFT spectrum analyzer off a
   USB mic via `sounddevice`: 32 log-spaced bars, zero-padded FFT (finer
   bin spacing at the low end without added latency), a per-bar dB tilt to
@@ -263,11 +310,17 @@ either an Ed25519 or an EC secret.
   loudness, rendered as a scrolling LUFS history. `--floor`/`--ceil` tune
   the display range for a given input chain's actual level. Validated
   against BS.1770's own calibration point — see `PROGRESS.md` session 8.
+
+### Other demos
+
 - `oled_hud/demos/wireframe.py` — a rotating 3D wireframe cube or pyramid
   (`--shape`), no PIL: per-frame rotation matrix, perspective projection
   scaled to the panel's 32px height, edges rasterized as lines via
   `np.linspace`. `pyramid` is the default — fewer edges alias less at this
   resolution than the cube, per live feedback in `PROGRESS.md` session 8.
+
+### Telemetry & market data
+
 - `scripts/prom_pull.py` — standalone terminal script (stdlib `urllib`
   only) pulling CPU temp/load/usage from a remote Prometheus/node_exporter
   and printing them; `--interval` loops. No OLED involved — just the raw
@@ -301,32 +354,24 @@ either an Ed25519 or an EC secret.
   glyph shapes on the same OLED cells for hours — a stopgap for burn-in
   ahead of H4, which is still not started.
 
-## Status
+## Open Items
 
-All five phases of the animation-engine plan are implemented: 0 (timing
-benchmarks), 1 (driver probe, partial), 2 (packed-tape core), 3
-(partial-blit driver) and 4 (effects & scheduling) — and every acceptance
-criterion from the handoff is checked off. See `PROGRESS.md` for the
-phase/session tracker and `NOTES.md` for the Phase 1 driver notes.
+- **H2 (view scheduler) and H4 (buttons, burn-in)** — not started. H0
+  (compositor), H1 (store/producers/fonts/first view), and H3 (daemon
+  lifecycle) are done and soak-tested.
+- **`systemd/oled-hud.service`** — written but not installed; needs a
+  one-time `sudo` on the target Pi.
+- **`hw_scroll_spike.py`** (hardware scroll register probe, noted in
+  `NOTES.md`) — never run. Non-blocking: the tape approach avoids hardware
+  scroll entirely, and nothing depends on it.
 
-The 30-minute production-config soak (60fps, 1px step) ran clean:
-108,000 frames, 0 late, 0 dropped, 0 errors, RSS flat after an early
-warm-up staircase, blit p95 unchanged start-to-end. `py-spy` confirms the
-frame loop never touches PIL/font code, not just by inspection — see
-`PROGRESS.md`'s session 5 for the full numbers and the
-`scripts/analyze_soak.py` methodology (including a real bug it caught in
-its own first version: a naive "monotonic" leak check that couldn't tell
-a plateaued warm-up staircase from an actual climb).
+Everything else is implemented and validated: all five animation-engine
+phases (0-4) are done and every acceptance criterion from the handoff is
+checked off — a 30-minute production-config soak (60fps, 1px step) ran
+108,000 frames with 0 late, 0 dropped, 0 errors, RSS flat, blit p95
+unchanged start-to-end (`PROGRESS.md` session 5). The HUD daemon's
+30-second/60fps run did 1800 frames with 0 late/dropped, re-rendering 19
+times and pushing 21 times — over 99% of frames pushed nothing at all.
 
-On the HUD side, phases H0 (compositor), H1 (store, producers, fonts, first
-real view) and H3 (daemon lifecycle) are implemented. The daemon now shows
-live local-system telemetry through vendored bitmap fonts with no PIL in the
-frame path: a 30-second run at 60fps did 1800 frames with 0 late and 0
-dropped, re-rendering 19 times and pushing 21 times — over 99% of frames
-pushed nothing at all. H2 (view scheduler) and H4 (buttons, burn-in) are
-next; the `systemd` unit is still uninstalled and needs a one-time `sudo`.
-
-FPS and scroll-step choices come from `BENCH.md`'s measurements and
-`FrameClock`'s reported slack, not from assumptions. Still open: the
-Phase 1 `hw_scroll_spike.py` probe noted in `NOTES.md` — never blocking,
-since the tape approach avoids hardware scroll entirely.
+See `PROGRESS.md` for the full phase/session tracker and `NOTES.md` for
+the Phase 1 driver notes.

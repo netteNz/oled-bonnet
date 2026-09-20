@@ -41,6 +41,8 @@ scripts through the venv:
 .env/bin/python3 scripts/prom_pull.py --url http://<host>:9090 --interval 2
 .env/bin/python3 -m oled_hud.demos.telemetry_display --url http://<host>:9090
 .env/bin/python3 -m oled_hud.demos.coinbase_ticker --poll-interval 15
+.env/bin/python3 -m oled_hud.demos.btc_sparkline --window 24h
+.env/bin/python3 -m oled_hud.demos.btc_sparkline --window live --live-span 300
 .env/bin/python3 -m oled_hud.demos.idle_clock
 .env/bin/python3 -m oled_hud.demos.idle_clock --12h
 .env/bin/python3 -m oled_hud.demos.font_sampler --font tomthumb
@@ -106,8 +108,9 @@ reachable Prometheus/node_exporter (`--url`, default
 `http://192.168.50.249:9090` — the user's Pi 4). Both are stdlib-only
 (`urllib`), no extra dependency.
 
-`oled_hud/demos/coinbase_ticker.py` needs a Coinbase Developer Platform
-(CDP) API key and reads it from `.env.secrets` in the repo root — gitignored,
+`oled_hud/demos/coinbase_ticker.py` and `oled_hud/demos/btc_sparkline.py`
+need a Coinbase Developer Platform (CDP) API key and read it from
+`.env.secrets` in the repo root — gitignored,
 `chmod 600`, **not** named `.env` since that's the venv directory (see
 Setup above). Copy `.env.secrets.example` to `.env.secrets` and fill in your
 own `CDP_API_KEY` and `CDP_API_SECRET`; never commit the real file. Auth
@@ -278,6 +281,16 @@ either an Ed25519 or an EC secret.
   row per holding, same poll/frame-loop split as `telemetry_display.py`.
   Auth via the official `coinbase-advanced-py` SDK's `RESTClient`,
   credentials from `.env.secrets` (see Setup above).
+- `oled_hud/demos/btc_sparkline.py` — BTC-USD trend sparkline (left 78px)
+  next to a stacked span/price/change readout (right 48px), through the
+  Compositor. `--window` picks the span: `24h`, `1h` and `30m` are candle
+  windows refetched every `--refresh-interval`, while `live` is a sliding
+  window (default 15m, `--live-span`) seeded from candles so it's full from
+  the first frame, then carried forward by WS ticks placed on the x-axis by
+  timestamp — points drift left in real time and age off the end. The plot
+  auto-scales to the window's own min/max, floored at `MIN_RANGE_FRACTION`
+  of the price so a quiet stretch doesn't get amplified into a fake crash.
+  Same credentials as `coinbase_ticker.py`.
 - `oled_hud/demos/idle_clock.py` — screensaver-style idle display: big
   seven-segment-style digits (hand-drawn rectangles, no PIL) with a
   blinking colon, plus a weekday/date line in the vendored Spleen font.

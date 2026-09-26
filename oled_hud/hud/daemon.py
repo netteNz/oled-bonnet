@@ -44,10 +44,11 @@ from oled_hud.hud import HEIGHT, WIDTH
 from oled_hud.hud.alerts import Alerts
 from oled_hud.hud.compositor import Compositor
 from oled_hud.hud.font import Font, load as load_font, names as font_names
-from oled_hud.hud.producers import ProducerThread
+from oled_hud.hud.portfolio import CoinbasePortfolio
+from oled_hud.hud.producers import Producer, ProducerThread, default_producers
 from oled_hud.hud.scheduler import Scheduler
 from oled_hud.hud.store import Store
-from oled_hud.hud.views import AlertView, ClockView, SysView, View
+from oled_hud.hud.views import AlertView, ClockView, PortfolioView, SysView, View
 
 FPS = 60.0
 DEFAULT_LOCK_PATH = os.path.expanduser("~/.oled-hud.lock")
@@ -59,7 +60,19 @@ DEFAULT_LOCK_PATH = os.path.expanduser("~/.oled-hud.lock")
 VIEW_FACTORIES: dict[str, Callable[[Font], View]] = {
     "sys": SysView,
     "clock": ClockView,
+    "portfolio": PortfolioView,
 }
+
+#: Producers a view needs beyond the always-on local-system set, started only
+#: when that view is in the rotation -- so a daemon without `portfolio` never
+#: imports the Coinbase SDK, reads credentials or touches the network.
+VIEW_PRODUCERS: dict[str, Callable[[], Producer]] = {
+    "portfolio": CoinbasePortfolio,
+}
+
+
+def build_producers(names: list[str]) -> list[Producer]:
+    return default_producers() + [VIEW_PRODUCERS[n]() for n in names if n in VIEW_PRODUCERS]
 
 
 def build_views(names: list[str], font: Font) -> list[View]:
@@ -173,16 +186,26 @@ def main(argv=None):
         comp = Compositor(display)
         comp.force_full()
         store = Store()
-        producers = ProducerThread(store).start()
-
+        view_names = [n for n in args.views.split(",") if n]
         font = load_font(args.font)
-        views = build_views([n for n in args.views.split(",") if n], font)
+        views = build_views(view_names, font)
+        producer_list = build_producers(view_names)
+        for producer in producer_list:
+            try:
+                producer.warm()
+            except Exception as exc:  # e.g. network down; poll() retries it
+                print(f"warm-up failed for {producer.name}: {exc}")
+        producers = ProducerThread(store, producer_list).start()
         transition_s = 0.0 if args.transition == "none" else args.transition_s
         alerts = None if args.no_alerts else Alerts()
         alert_view = None if args.no_alerts else AlertView(font)
         sched = Scheduler(views, dwell=args.dwell, alerts=alerts,
                           alert_view=alert_view, transition=transition_s)
 
+        # Setup -- producer warm-up especially, ~1s for the Coinbase SDK --
+        # happened on this clock's time. Without a reset, frame 1 is due
+        # before the loop even starts and gets booked as ~60 dropped frames.
+        clock.reset()
         renders, pushes, frames_pushing = run_loop(
             comp, store, sched, clock, stopping, seconds=args.seconds)
     except KeyboardInterrupt:

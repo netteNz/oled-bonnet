@@ -27,7 +27,7 @@ from collections.abc import Callable
 import numpy as np
 
 from oled_hud.hud import HEIGHT, WIDTH
-from oled_hud.hud.font import Font, upscale
+from oled_hud.hud.font import Font, load as load_font, upscale
 from oled_hud.hud.producers import format_uptime
 from oled_hud.hud.store import Snapshot
 from oled_hud.pack import pack_bits
@@ -261,6 +261,109 @@ class ClockView(View):
             day = _WEEKDAYS[t.tm_wday]
             gx = x0 + w + max(0, (gutter - self.font.measure(day)) // 2)
             self.font.draw(canvas, day, gx, self.y0)
+
+
+def format_usd(value: float) -> str:
+    """Cents only below $1k -- past that they aren't the digits that matter
+    and every character is panel width you don't have."""
+    return f"${value:,.0f}" if value >= 1000 else f"${value:,.2f}"
+
+
+class PortfolioView(View):
+    """Two panels split by a rule: the portfolio total on the left, a fixed
+    watchlist of coins on the right. Fed by `portfolio.CoinbasePortfolio`.
+
+    Left: whole dollars in 2x type with the cents as a small superscript,
+    price-tag style, so the number you glance for is the biggest thing on
+    the panel. Under it, an allocation bar -- one solid segment per watched
+    coin in watchlist order, 1px gaps between, and whatever the watchlist
+    doesn't cover (cash, other coins) left as a hollow outline.
+
+    Right: one small-type row per watched coin, symbol flush left and USD
+    value flush right. A coin you don't hold shows $0.00 rather than
+    vanishing, so the rows never reshuffle.
+
+    The total is the whole portfolio, cash included -- the bar is what shows
+    how much of it the watchlist accounts for. Staleness is judged once on
+    `pf.positions`, like every other view's single-reading rule: stale data
+    shows "$--" and no rows, never a frozen number.
+    """
+
+    name = "portfolio"
+
+    #: (asset as the API names it, label on the panel), top to bottom.
+    WATCHLIST = (("SOL", "SOL"), ("BTC", "BTC"), ("XRP", "XRP"), ("JUPITER", "JUP"))
+
+    SPLIT = 62  # x of the divider; the left panel is [0, SPLIT)
+
+    def __init__(self, font: Font, small: Font | None = None,
+                 watchlist: tuple[tuple[str, str], ...] | None = None):
+        self.font = font
+        self.small = small or load_font("tomthumb")
+        self.watchlist = self.WATCHLIST if watchlist is None else watchlist
+        self.right_x = self.SPLIT + 3
+        self.right_cols = (WIDTH - self.right_x) // self.small.advance
+        self.row_h = HEIGHT // len(self.watchlist)
+
+    def holdings(self, snap: Snapshot, now: float) -> tuple[float, list[tuple[str, float]]] | None:
+        """(total, [(label, usd)] in watchlist order), or None if stale."""
+        reading = snap.get("pf.positions")
+        total = snap.get("pf.total")
+        if reading is None or not reading.fresh(now) or total is None or not total.fresh(now):
+            return None
+        by_asset = {asset: usd for asset, _qty, usd in reading.value}
+        return float(total.value), [(label, by_asset.get(asset, 0.0)) for asset, label in self.watchlist]
+
+    def _draw_total(self, canvas: np.ndarray, total: float | None) -> None:
+        if total is None:
+            dollars, cents = "$--", ""
+        else:
+            whole = int(total)
+            dollars, cents = f"${whole:,}", f"{round((total - whole) * 100) % 100:02d}"
+        width = self.SPLIT - 2
+        # Drop to 1x type only when 2x can't fit (a total past ~$99,999);
+        # cents are the first thing to go, before the scale does.
+        for scale, text_c in ((2, cents), (2, ""), (1, cents)):
+            big = upscale(self.font.render(dollars), scale)
+            if big.shape[1] + self.font.measure(text_c) <= width:
+                break
+        h, w = big.shape
+        canvas[1 : 1 + h, 1 : 1 + w] |= big
+        if text_c:
+            self.font.draw(canvas, text_c, 2 + w, 1)
+
+    def _draw_bar(self, canvas: np.ndarray, total: float, values: list[float]) -> None:
+        """Outline across the left panel, filled per watched coin."""
+        x0, x1, y0, y1 = 1, self.SPLIT - 3, 23, 30
+        canvas[y0, x0 : x1 + 1] = canvas[y1, x0 : x1 + 1] = True
+        canvas[y0 : y1 + 1, x0] = canvas[y0 : y1 + 1, x1] = True
+        if total <= 0:
+            return
+        inner = x1 - x0 - 1
+        x = x0 + 1
+        for usd in values:
+            w = int(round(inner * min(usd, total) / total))
+            if w >= 2:
+                # The last column of each segment is left dark as the gap.
+                canvas[y0 + 2 : y1 - 1, x : x + w - 1] = True
+            x += w
+            if x >= x1:
+                break
+
+    def render(self, canvas: np.ndarray, snap: Snapshot, now: float) -> None:
+        held = self.holdings(snap, now)
+        canvas[:, self.SPLIT] = True
+        if held is None:
+            self._draw_total(canvas, None)
+            return
+        total, rows = held
+        self._draw_total(canvas, total)
+        self.small.draw(canvas, "TOTAL", 1, 17)
+        self._draw_bar(canvas, total, [usd for _label, usd in rows])
+        y_pad = (self.row_h - self.small.height) // 2
+        for i, (label, usd) in enumerate(rows):
+            text = row([label, format_usd(usd)], self.right_cols)
+            self.small.draw(canvas, text, self.right_x, i * self.row_h + y_pad)
 
 
 class AlertView(View):

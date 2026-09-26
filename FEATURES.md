@@ -46,7 +46,7 @@ rotating every 8s into a big-type clock, and switching to a CPU-hot / disk-full
 | flag | default | what |
 |---|---|---|
 | `--font {spleen,tomthumb,fixed4x6}` | `spleen` | bitmap font; sets the line/column budget |
-| `--views sys,clock` | `sys,clock` | comma-separated rotation order |
+| `--views sys,clock` | `sys,clock` | comma-separated rotation order, from `sys`, `clock`, `portfolio` |
 | `--dwell SECONDS` | `8.0` | how long each view holds before rotating |
 | `--transition {slide,none}` | `slide` | how the panel switches between views |
 | `--transition-s SECONDS` | `0.3` | slide duration |
@@ -62,7 +62,16 @@ Examples:
 .env/bin/python3 -m oled_hud.hud.daemon --font fixed4x6 --seconds 20 --stats
 .env/bin/python3 -m oled_hud.hud.daemon --dwell 30 --transition none   # one long-held view at a time, no slide cost
 .env/bin/python3 -m oled_hud.hud.daemon --no-alerts                    # rotation only, no preemption
+.env/bin/python3 -m oled_hud.hud.daemon --views sys,clock,portfolio    # add your Coinbase portfolio
 ```
+
+**`portfolio` view** — your Coinbase portfolio total (cash included) in big
+type with superscript cents and an allocation bar, beside SOL / BTC / XRP /
+JUP values. Needs a CDP API key in `.env.secrets` (see the Coinbase ticker
+below). Polls `get_portfolio_breakdown()` once a minute; the SDK and
+credentials are only touched when `portfolio` is in `--views`. The coin list
+is `PortfolioView.WATCHLIST` in `oled_hud/hud/views.py`, keyed by Coinbase's
+asset name (`JUPITER`, not `JUP`). Stale for 4 minutes → `$--`.
 
 Threshold alerts (`oled_hud/hud/alerts.py`, tunable there, not on the CLI):
 CPU temp > 70°C, disk > 90%, memory > 92% (held 10s), 1-minute load > 4.0

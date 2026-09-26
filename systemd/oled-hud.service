@@ -4,7 +4,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/Scripts/oled/.env/bin/python -m oled_hud.hud.daemon
+# Required: the repo is run in place, not installed, so `-m oled_hud...` only
+# resolves from the repo root -- and a user unit's default cwd is $HOME.
+WorkingDirectory=%h/Scripts/oled
+ExecStart=%h/Scripts/oled/.env/bin/python -m oled_hud.hud.daemon --views sys,clock,portfolio
 Restart=on-failure
 RestartSec=2
 KillSignal=SIGTERM

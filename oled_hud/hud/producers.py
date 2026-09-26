@@ -117,6 +117,13 @@ class Producer:
     def poll(self) -> dict[str, object]:
         raise NotImplementedError
 
+    def warm(self) -> None:
+        """One-time setup the daemon runs on the main thread before the frame
+        loop starts. For work too heavy to do on the producer thread
+        mid-loop -- importing a large SDK holds the GIL long enough to make
+        frames late. A no-op for everything that only reads sysfs.
+        """
+
 
 class _FileProducer(Producer):
     """Shared plumbing: a producer that reads one text file."""

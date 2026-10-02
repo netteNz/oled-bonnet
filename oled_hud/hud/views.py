@@ -223,7 +223,7 @@ class ClockView(View):
     or the wall clock actually moving.
 
     `refresh = 1.0` asks the scheduler to redraw this view once a second, but
-    "HH:MM" only changes once a minute -- so 59 of every 60 renders produce a
+    "H:MM" only changes once a minute -- so 59 of every 60 renders produce a
     canvas byte-identical to the one already on screen, and the Compositor's
     diff turns those into zero pushes. That's why the gutter next to the big
     digits carries the day of week rather than seconds: a seconds readout
@@ -246,17 +246,23 @@ class ClockView(View):
 
     def render(self, canvas: np.ndarray, snap: Snapshot, now: float) -> None:
         t = self.localtime(self.wall())
-        text = f"{t.tm_hour:02d}:{t.tm_min:02d}"
+        # 12-hour, no leading zero ("3:04", not "03:04"); the AM/PM marker
+        # goes in the gutter below rather than widening the big digits.
+        text = f"{t.tm_hour % 12 or 12}:{t.tm_min:02d}"
         big = upscale(self.font.render(text), self.scale)
         h, w = big.shape
         x0 = (WIDTH - w) // 2
         canvas[self.y0 : self.y0 + h, x0 : x0 + w] |= big
 
-        # Whatever width is left of the centered clock carries one small
-        # status field -- the day of week, which (like the hour and minute)
-        # is stable for the whole minute, keeping the byte-identical-frame
-        # property above intact.
+        # Whatever width is left of the centered clock carries small status
+        # fields -- AM/PM along the bottom, the day of week along the top when
+        # it fits. Both (like the hour and minute) are stable for the whole
+        # minute, keeping the byte-identical-frame property above intact.
         gutter = WIDTH - (x0 + w)
+        meridiem = "AM" if t.tm_hour < 12 else "PM"
+        if gutter >= self.font.measure(meridiem):
+            gx = x0 + w + (gutter - self.font.measure(meridiem)) // 2
+            self.font.draw(canvas, meridiem, gx, self.y0 + h - self.font.height)
         if gutter >= self.font.advance * len(_WEEKDAYS[0]):
             day = _WEEKDAYS[t.tm_wday]
             gx = x0 + w + max(0, (gutter - self.font.measure(day)) // 2)

@@ -363,7 +363,7 @@ def test_the_clock_is_horizontally_centered():
     # a font's own left/right padding (see test_font.py) would otherwise
     # make an ink-based bounding box an unreliable proxy for centering.
     view = clock_view()
-    big = upscale(load("spleen").render("03:04"), 4)
+    big = upscale(load("spleen").render("3:04"), 4)
     w = big.shape[1]
     x0 = (WIDTH - w) // 2
     assert x0 == WIDTH - x0 - w  # symmetric margins either side
@@ -377,12 +377,47 @@ def test_the_clock_uses_the_injected_wall_clock():
     view.render(canvas, {}, NOW)
     expected = np.zeros((HEIGHT, WIDTH), dtype=bool)
     font = load("spleen")
-    big = upscale(font.render("03:04"), 4)
+    big = upscale(font.render("3:04"), 4)
     h, w = big.shape
     x0 = (WIDTH - w) // 2
     y0 = (HEIGHT - h) // 2
     expected[y0 : y0 + h, x0 : x0 + w] |= big
+    gutter = WIDTH - (x0 + w)
+    font.draw(expected, "AM", x0 + w + (gutter - font.measure("AM")) // 2, y0 + h - font.height)
+    font.draw(expected, "THU", x0 + w + (gutter - font.measure("THU")) // 2, y0)
     assert np.array_equal(canvas[: view.big_h, :], expected[: view.big_h, :])
+
+
+def _clock_canvas(hour, minute):
+    canvas = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    ClockView(load("spleen"), wall=lambda: hour * 3600 + minute * 60,
+              localtime=time.gmtime).render(canvas, {}, NOW)
+    return canvas
+
+
+def _expected_clock(text, meridiem):
+    font = load("spleen")
+    expected = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    big = upscale(font.render(text), 4)
+    h, w = big.shape
+    x0 = (WIDTH - w) // 2
+    expected[:h, x0 : x0 + w] |= big
+    gutter = WIDTH - (x0 + w)
+    font.draw(expected, meridiem, x0 + w + (gutter - font.measure(meridiem)) // 2, h - font.height)
+    if gutter >= font.advance * 3:
+        font.draw(expected, "THU", x0 + w + (gutter - font.measure("THU")) // 2, 0)
+    return expected
+
+
+@pytest.mark.parametrize("hour, minute, text, meridiem", [
+    (0, 5, "12:05", "AM"),   # midnight is 12, not 0
+    (3, 4, "3:04", "AM"),    # no leading zero
+    (12, 0, "12:00", "PM"),  # noon flips to PM
+    (15, 30, "3:30", "PM"),  # afternoon wraps to 12-hour
+    (23, 59, "11:59", "PM"),
+])
+def test_the_clock_is_twelve_hour_with_am_pm(hour, minute, text, meridiem):
+    assert np.array_equal(_clock_canvas(hour, minute), _expected_clock(text, meridiem))
 
 
 def test_the_same_minute_renders_byte_identical_frames():
